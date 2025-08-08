@@ -1,0 +1,115 @@
+from bs4 import BeautifulSoup
+import re
+
+def _clean_html_for_msg(html: str) -> str:
+    if not html:
+        return ""
+    html = re.sub(r'<!--\[if.*?endif]-->', '', html, flags=re.DOTALL|re.IGNORECASE)
+    html = re.sub(r'<xml>.*?</xml>', '', html, flags=re.DOTALL|re.IGNORECASE)
+    html = re.sub(r'<br\s*/?>', ' ', html, flags=re.IGNORECASE)
+    return html
+
+def _cell_text(td) -> str:
+    txt = td.get_text(" ", strip=True)
+    txt = re.sub(r'\xa0', ' ', txt)
+    txt = re.sub(r'\s+', ' ', txt).strip()
+    return txt
+
+def extract_html_tables_as_text_from_html(html_body: str) -> str:
+    if not html_body:
+        return ""
+
+    html = _clean_html_for_msg(html_body)
+    try:
+        import pandas as pd
+        tables = pd.read_html(html)
+        lines = []
+        for df in tables:
+            df.columns = [str(c).strip() for c in df.columns]
+            for _, row in df.iterrows():
+                kv = []
+                for k, v in row.items():
+                    v_str = "" if (pd.isna(v)) else str(v).strip()
+                    if v_str != "":
+                        kv.append(f"{k}: {v_str}")
+                if kv:
+                    lines.append(", ".join(kv))
+        if lines:
+            return "\n".join(lines)
+    except Exception:
+        pass
+
+    soup = BeautifulSoup(html, "html.parser")
+    lines = []
+
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+
+        header_row = None
+        for r in rows:
+            if r.find_all("th"):
+                header_row = r
+                break
+        if header_row is None:
+            header_row = rows[0]
+
+        headers = [_cell_text(c) for c in header_row.find_all(["th", "td"])]
+        headers = [h for h in headers if h]
+
+        if not headers:
+            if len(rows) > 1:
+                probe = [_cell_text(c) for c in rows[1].find_all(["td","th"])]
+                n = len(probe) or 0
+            else:
+                n = 0
+            headers = [f"COL{i+1}" for i in range(n)]
+
+        for r in rows:
+            if r == header_row:
+                continue
+            vals = [_cell_text(c) for c in r.find_all(["td","th"])]
+            if not any(v for v in vals):
+                continue
+
+            if len(vals) < len(headers):
+                vals += [""] * (len(headers) - len(vals))
+            elif len(vals) > len(headers):
+                vals = vals[:len(headers)]
+
+            row_dict = dict(zip(headers, vals))
+            kv = [f"{k}: {v}" for k, v in row_dict.items() if v != ""]
+            if kv:
+                lines.append(", ".join(kv))
+
+    return "\n".join(lines)
+
+
+def table_rows_to_text(table_rows):
+    if not table_rows:
+        return ""
+
+    headers = [str(h).strip() for h in table_rows[0]]
+    lines = []
+    for r in table_rows[1:]:
+        row = [str(x).strip() for x in r]
+        if len(row) < len(headers):
+            row += [""] * (len(headers) - len(row))
+        elif len(row) > len(headers):
+            row = row[:len(headers)]
+        pairs = [f"{h}: {v}" for h, v in zip(headers, row) if v]
+        if pairs:
+            lines.append(", ".join(pairs))
+    return "\n".join(lines)
+
+
+def all_tables_to_text(html_tables):
+    if not html_tables:
+        return ""
+    is_single_table = isinstance(html_tables, list) and html_tables and all(isinstance(x, str) for x in html_tables[0])
+    tables = [html_tables] if is_single_table else html_tables
+    blocks = []
+    for tbl in tables:
+        blocks.append(table_rows_to_text(tbl))
+    return "\n".join([b for b in blocks if b])
