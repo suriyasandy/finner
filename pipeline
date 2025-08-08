@@ -1,7 +1,6 @@
-# pipeline.py
 import yaml
 from extractors.file_loader import load_and_normalize
-from matchers.gazetteer_builder import build_gazetteers_from_csv
+from gazetteer_loader import load_gazetteers_from_json
 from matchers.matcher import extract_with_gazetteers
 from matchers.regex_patterns import patterns
 from nlp.ai_fallback import run_ai_fallback
@@ -14,58 +13,56 @@ def _add_cand(bucket, field, value, method, conf, source, span, snippet, extras=
         "extras": extras or {}
     })
 
-def run_pipeline(file_path_or_html, csv_path, config_path):
-    with open(config_path) as f:
+def run_pipeline(file_path_or_html, config_path):
+    with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
-    # 1) Normalize input to text
+    # 1) normalize text
     text = load_and_normalize(file_path_or_html)
 
-    # 2) Gazetteers from CSV, then match
-    gazetteers, alias_maps = build_gazetteers_from_csv(csv_path, config_path)
-    gaz_matches = extract_with_gazetteers(text, gazetteers, alias_maps)
+    # 2) gazetteers (common + product JSON)
+    common_json = cfg["gazetteer_json"]["common"]
+    product_json = cfg["gazetteer_json"]["product"]
+    gazetteers, alias_maps, fuzzy_cfg, _ = load_gazetteers_from_json(common_json, product_json)
 
-    # 3) Build candidate bucket
+    # 3) gazetteer extraction
+    gaz_hits = extract_with_gazetteers(text, gazetteers, alias_maps, fuzzy_cfg)
+
     candidates = {}
-
-    # Gazetteer candidates (exact/fuzzy already reflected in confidence)
-    for field, hits in gaz_matches.items():
+    for field, hits in gaz_hits.items():
         for h in hits:
-            method = "gazetteer_exact" if h["confidence"] >= 0.93 else "gazetteer_fuzzy"
-            snippet = text[max(0, h["span"][0]-40): min(len(text), h["span"][1]+40)]
-            _add_cand(candidates, field, h["value"], method, h["confidence"], "TXT", h["span"], snippet)
+            method = h.get("method", "gazetteer_exact")
+            span = tuple(h["span"])
+            snippet = text[max(0, span[0]-40): min(len(text), span[1]+40)]
+            _add_cand(candidates, field, h["value"], method, h["confidence"], "TXT", span, snippet)
 
-    # 4) Pattern fields from config → use regex buckets
+    # 4) pattern extraction (use YAML field groups)
+    groups = cfg["field_groups"]
     cat_to_rx = {"dates":"date", "percents":"percent", "amounts":"amount_ccy", "currencies":"currency"}
-    for cat, fields in cfg.get("pattern_fields", {}).items():
-        rx_key = cat_to_rx.get(cat)
-        if not rx_key: continue
-        rx = patterns[rx_key]
+    for cat, fields in groups.get("pattern_fields", {}).items():
+        rx = patterns[cat_to_rx[cat]]
         for m in rx.finditer(text):
             span = (m.start(), m.end())
             snippet = text[max(0, span[0]-40): min(len(text), span[1]+40)]
             for field in fields:
-                # Create a candidate per field; resolver will pick the best per field
                 _add_cand(candidates, field, m.group(0), "regex_strong", 0.90, "TXT", span, snippet)
 
-    # 5) AI fallback for unresolved fields
-    resolved_fields = set(candidates.keys())
-    all_fields = set(cfg.get("gazetteer_fields", []))
-    for group, flds in cfg.get("pattern_fields", {}).items():
+    # 5) AI fallback for unresolved
+    resolved = set(candidates.keys())
+    all_fields = set(groups.get("gazetteer_fields", []))
+    for _cat, flds in groups.get("pattern_fields", {}).items():
         all_fields.update(flds)
-    all_fields.update(cfg.get("fallback_fields", []))
-    unresolved = sorted(all_fields - resolved_fields)
+    all_fields.update(groups.get("fallback_fields", []))
+    unresolved = sorted(all_fields - resolved)
+
     ai_hits = run_ai_fallback(text, unresolved)
     for field, hits in ai_hits.items():
         for h in hits:
-            _add_cand(candidates, field, h["value"], h["method"], h["confidence"], h["source"], h["span"], h["snippet"])
+            span = tuple(h["span"])
+            _add_cand(candidates, field, h["value"], h["method"], h["confidence"], h.get("source","TXT"), span, h.get("snippet",""))
 
-    # 6) Resolve to final fields dict
+    # 6) resolve to final
     fields = resolve_candidates(candidates)
+    overall = round(sum(v["final_confidence"] for v in fields.values())/max(1,len(fields)), 3)
 
-    return {
-        "record_key": None,              # fill if you compute record keys
-        "overall_trust": round(sum(v["final_confidence"] for v in fields.values())/max(1,len(fields)), 3),
-        "fields": fields,
-        "raw_text": text
-    }
+    return {"product": cfg.get("product"), "overall_trust": overall, "fields": fields, "raw_text": text}
