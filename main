@@ -1,0 +1,9 @@
+from pipeline import run_pipeline
+from pprint import pprint
+
+# Path to config and your input file (HTML, PDF, text, or image)
+config_path = "config_gfxcash.yml"
+file_path = "sample_data/sample_email.html"  # or .msg parsed HTML
+
+result = run_pipeline(file_path, config_path)
+pprint(result)
