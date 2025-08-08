@@ -1,0 +1,13 @@
+def _clean_html_for_msg(html) -> str:
+    if not html:
+        return ""
+    # Decode bytes to str if needed
+    if isinstance(html, bytes):
+        try:
+            html = html.decode("utf-8", errors="ignore")
+        except Exception:
+            html = html.decode("latin-1", errors="ignore")
+    html = re.sub(r'<!--\[if.*?endif\]-->', '', html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r'<xml>.*?</xml>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r'<br\s*/?>', ' ', html, flags=re.IGNORECASE)
+    return html
