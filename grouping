@@ -1,0 +1,192 @@
+from typing import Dict, List, Tuple, Any
+import re
+from collections import defaultdict
+
+def _span_overlap(a: Tuple[int,int], b: Tuple[int,int]) -> int:
+    return max(0, min(a[1], b[1]) - max(a[0], b[0]))
+
+def _char_distance(a: Tuple[int,int], b: Tuple[int,int]) -> int:
+    # distance between start of spans
+    return abs(a[0] - b[0])
+
+def _window_assign(anchor_spans: List[Tuple[int,int]], cand_span: Tuple[int,int], win=300) -> int:
+    """
+    Return index of nearest anchor if within `win` chars, else -1.
+    """
+    if not anchor_spans:
+        return -1
+    dists = [_char_distance(s, cand_span) for s in anchor_spans]
+    i = min(range(len(dists)), key=lambda k: dists[k])
+    return i if dists[i] <= win else -1
+
+def _line_blocks(text: str) -> List[Tuple[int,int]]:
+    """
+    Build rough 'blocks' (line/chunk boundaries) to prefer grouping by same line/paragraph.
+    """
+    # split on newlines but keep absolute character positions
+    blocks = []
+    start = 0
+    for m in re.finditer(r"\n+", text):
+        blocks.append((start, m.start()))
+        start = m.end()
+    blocks.append((start, len(text)))
+    # merge tiny blocks
+    merged = []
+    for b in blocks:
+        if not merged: merged.append(b); continue
+        if b[1]-b[0] < 20:  # tiny chunk, merge with previous
+            prev = merged.pop()
+            merged.append((prev[0], b[1]))
+        else:
+            merged.append(b)
+    return merged
+
+def _block_index(blocks: List[Tuple[int,int]], span: Tuple[int,int]) -> int:
+    for i,(s,e) in enumerate(blocks):
+        if span[0] >= s and span[0] <= e:
+            return i
+    return -1
+
+def group_entities_by_trade(result: Dict[str, Any], anchor_field="trade_id", fallback_anchor="execution_key",
+                            proximity_window=300) -> Dict[str, Any]:
+    """
+    Input = pipeline result { 'fields': {field: {...}}, 'raw_text': str }
+    Output = adds 'trades': [ {anchor_field, entities:{}, evidence:[], score:float}, ... ]
+    Groups fields by proximity to each trade anchor mention.
+    """
+    text = result.get("raw_text", "") or ""
+    fields = result.get("fields", {}) or {}
+
+    # Collect all candidate anchors (trade_id first)
+    anchors = []
+    anchor_name = anchor_field
+    anchor_hits = fields.get(anchor_field, {})
+    if anchor_hits:
+        anchors = anchor_hits.get("evidence", [])
+    if not anchors:
+        anchor_name = fallback_anchor
+        anchor_hits = fields.get(fallback_anchor, {})
+        if anchor_hits:
+            anchors = anchor_hits.get("evidence", [])
+
+    # Extract unique anchor tokens (value + spans)
+    anchor_values = []
+    anchor_spans = []
+    if anchors:
+        # collapse by value but keep multiple spans (multiple occurrences)
+        by_val = defaultdict(list)
+        for ev in anchors:
+            by_val[ev["value"]].append(tuple(ev.get("span", (0,0))))
+        for val, spans in by_val.items():
+            anchor_values.append(val)
+            anchor_spans.append(spans)
+    else:
+        # No anchor found: fallback to single bucket "UNANCHORED"
+        bucket = {
+            anchor_name: None,
+            "entities": {},
+            "evidence": [],
+            "score": 0.0
+        }
+        # Just dump fields into a single card
+        scores = []
+        for f, info in fields.items():
+            if "value" not in info: continue
+            bucket["entities"][f] = info["value"]
+            scores.append(info.get("final_confidence", 0.0))
+            if "evidence" in info:
+                bucket["evidence"].extend(info["evidence"])
+        bucket["score"] = round(sum(scores)/max(1,len(scores)), 3)
+        result["trades"] = [bucket]
+        return result
+
+    # Build block map for better grouping (same line/paragraph bias)
+    blocks = _line_blocks(text)
+
+    # Initialize trade cards (one per anchor value; if value appears multiple times we still keep one card)
+    trade_cards = []
+    for i, val in enumerate(anchor_values):
+        trade_cards.append({
+            anchor_name: val,
+            "entities": {},
+            "evidence": [],
+            "score": 0.0,
+            "_anchor_spans": anchor_spans[i],  # internal use
+        })
+
+    # Add anchor evidence to its card
+    for i, card in enumerate(trade_cards):
+        for sp in card["_anchor_spans"]:
+            # locate snippet
+            s,e = sp
+            snip = text[max(0, s-40):min(len(text), e+40)]
+            card["evidence"].append({
+                "field": anchor_name, "value": card[anchor_name],
+                "span": sp, "snippet": snip, "method": "anchor"
+            })
+
+    # Assign all other fields to the nearest anchor occurrence
+    ANCHOR_BLOCK_WEIGHT = 0.15  # small boost if same 'line block'
+    scores_by_card = [[] for _ in trade_cards]
+
+    for field, info in fields.items():
+        if field in (anchor_field, fallback_anchor):
+            continue
+        val = info.get("value")
+        if val is None:
+            continue
+
+        # pick the best evidence (highest conf)
+        evs = info.get("evidence", [])
+        if not evs:
+            # synthesize an evidence without span
+            evs = [{"value": val, "span": (0,0), "snippet": "", "conf": info.get("final_confidence", 0.0), "method": info.get("method","")}]
+
+        best_ev = max(evs, key=lambda x: x.get("conf", 0.0))
+        cand_span = tuple(best_ev.get("span", (0,0)))
+
+        # find nearest anchor span across all cards
+        best_card_idx, best_score = -1, -1e9
+        for i, card in enumerate(trade_cards):
+            idx = _window_assign(card["_anchor_spans"], cand_span, win=proximity_window)
+            if idx == -1:
+                # Not within window of any anchor span of this card
+                continue
+            score = best_ev.get("conf", 0.0)
+            # small preference if same line/paragraph block
+            cblk = _block_index(blocks, cand_span)
+            ablk = _block_index(blocks, card["_anchor_spans"][idx])
+            if cblk != -1 and ablk != -1 and cblk == ablk:
+                score += ANCHOR_BLOCK_WEIGHT
+            if score > best_score:
+                best_score, best_card_idx = score, i
+
+        # If we didn't find a nearby anchor, skip assignment (or put in a misc bucket)
+        if best_card_idx == -1:
+            continue
+
+        # Assign field to the chosen trade card (keep highest-confidence value per field)
+        card = trade_cards[best_card_idx]
+        prev = card["entities"].get(field)
+        if prev is None or best_ev.get("conf",0) > 0.5:
+            card["entities"][field] = val
+
+        # add evidence
+        card["evidence"].append({
+            "field": field, "value": val,
+            "span": cand_span, "snippet": best_ev.get("snippet", ""),
+            "method": best_ev.get("method", info.get("method","")),
+            "conf": best_ev.get("conf", info.get("final_confidence", 0.0))
+        })
+        scores_by_card[best_card_idx].append(info.get("final_confidence", 0.0))
+
+    # finalize scores and strip internals
+    for i, card in enumerate(trade_cards):
+        card["score"] = round(sum(scores_by_card[i]) / max(1, len(scores_by_card[i])), 3)
+        card.pop("_anchor_spans", None)
+
+    # Only keep cards that actually have something besides the anchor
+    trade_cards = [c for c in trade_cards if c["entities"]]
+
+    result["trades"] = trade_cards
+    return result
