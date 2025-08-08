@@ -1,0 +1,34 @@
+# 4) pattern extraction (anchor-aware)
+from nlp.ai_fallback import ANCHORS  # reuse the same anchor dictionary
+
+groups = cfg["field_groups"]
+cat_to_rx = {"dates":"date", "percents":"percent", "amounts":"amount_ccy", "currencies":"currency"}
+ANCHOR_WIN = 80  # characters; tune 60–120
+
+for cat, fields in groups.get("pattern_fields", {}).items():
+    rx = patterns[cat_to_rx[cat]]
+
+    # Precompute matches once
+    matches = [(m.start(), m.end(), m.group(0)) for m in rx.finditer(text)]
+
+    for field in fields:
+        # Field-specific anchors (fallback to field name)
+        terms = ANCHORS.get(field, [field.replace("_", " ")])
+        aps = _find_anchor_positions(text, terms)
+
+        # If no anchors found, we can either skip or add low-confidence generic regex
+        if not aps:
+            # Optional: keep this but with lower conf so anchored values win
+            for s, e, val in matches:
+                snip = text[max(0, s-40): min(len(text), e+40)]
+                _add_cand(candidates, field, val, "regex_generic", 0.80, "TXT", (s, e), snip)
+            continue
+
+        # Attach only matches near anchors, and tag as anchored
+        for s, e, val in matches:
+            # distance to closest anchor
+            d = min(abs(s - ap) for ap in aps)
+            if d <= ANCHOR_WIN:
+                snip = text[max(0, s-40): min(len(text), e+40)]
+                # Anchored regex gets higher confidence than generic
+                _add_cand(candidates, field, val, "regex_anchored", 0.93, "TXT", (s, e), snip)
