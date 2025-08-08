@@ -1,24 +1,19 @@
+def _state(score: float) -> str:
+    if score >= 0.90: return "auto_accept"
+    if score >= 0.70: return "needs_review"
+    return "likely_wrong"
+
 def extract_max_conf_per_field(fields: dict) -> dict:
     """
-    From resolved fields dict, return a new dict:
-    { field: {"value": ..., "confidence": ...} }
-    Only keeps the top confidence value per field.
+    fields: resolved dict from resolve_candidates (has value, final_confidence, state, evidence...)
+    returns: { field: {value, confidence, state} }
     """
-    result = {}
+    out = {}
     for field, info in fields.items():
-        if not info:
+        if not isinstance(info, dict):
             continue
-        if isinstance(info, dict) and "value" in info:
-            # Already resolved to single value
-            result[field] = {
-                "value": info["value"],
-                "confidence": info.get("final_confidence", 0.0)
-            }
-        elif isinstance(info, list):
-            # If list of candidates, pick max confidence
-            best = max(info, key=lambda x: x.get("conf", 0.0))
-            result[field] = {
-                "value": best.get("value"),
-                "confidence": best.get("conf", 0.0)
-            }
-    return result
+        v = info.get("value")
+        conf = info.get("final_confidence", 0.0)
+        st = info.get("state") or _state(conf)
+        out[field] = {"value": v, "confidence": conf, "state": st}
+    return out
