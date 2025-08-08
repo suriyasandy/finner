@@ -1,0 +1,13 @@
+def _find_anchor_positions(text: str, terms):
+    low = text.lower()
+    pos = []
+    for t in terms:
+        t = t.lower()
+        start = 0
+        while True:
+            i = low.find(t, start)
+            if i < 0:
+                break
+            pos.append(i)
+            start = i + len(t)
+    return pos
