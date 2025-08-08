@@ -1,0 +1,71 @@
+# pipeline.py
+import yaml
+from extractors.file_loader import load_and_normalize
+from matchers.gazetteer_builder import build_gazetteers_from_csv
+from matchers.matcher import extract_with_gazetteers
+from matchers.regex_patterns import patterns
+from nlp.ai_fallback import run_ai_fallback
+from resolver import resolve_candidates
+
+def _add_cand(bucket, field, value, method, conf, source, span, snippet, extras=None):
+    bucket.setdefault(field, []).append({
+        "value": value, "method": method, "conf": conf,
+        "source": source, "span": span, "snippet": snippet,
+        "extras": extras or {}
+    })
+
+def run_pipeline(file_path_or_html, csv_path, config_path):
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f)
+
+    # 1) Normalize input to text
+    text = load_and_normalize(file_path_or_html)
+
+    # 2) Gazetteers from CSV, then match
+    gazetteers, alias_maps = build_gazetteers_from_csv(csv_path, config_path)
+    gaz_matches = extract_with_gazetteers(text, gazetteers, alias_maps)
+
+    # 3) Build candidate bucket
+    candidates = {}
+
+    # Gazetteer candidates (exact/fuzzy already reflected in confidence)
+    for field, hits in gaz_matches.items():
+        for h in hits:
+            method = "gazetteer_exact" if h["confidence"] >= 0.93 else "gazetteer_fuzzy"
+            snippet = text[max(0, h["span"][0]-40): min(len(text), h["span"][1]+40)]
+            _add_cand(candidates, field, h["value"], method, h["confidence"], "TXT", h["span"], snippet)
+
+    # 4) Pattern fields from config → use regex buckets
+    cat_to_rx = {"dates":"date", "percents":"percent", "amounts":"amount_ccy", "currencies":"currency"}
+    for cat, fields in cfg.get("pattern_fields", {}).items():
+        rx_key = cat_to_rx.get(cat)
+        if not rx_key: continue
+        rx = patterns[rx_key]
+        for m in rx.finditer(text):
+            span = (m.start(), m.end())
+            snippet = text[max(0, span[0]-40): min(len(text), span[1]+40)]
+            for field in fields:
+                # Create a candidate per field; resolver will pick the best per field
+                _add_cand(candidates, field, m.group(0), "regex_strong", 0.90, "TXT", span, snippet)
+
+    # 5) AI fallback for unresolved fields
+    resolved_fields = set(candidates.keys())
+    all_fields = set(cfg.get("gazetteer_fields", []))
+    for group, flds in cfg.get("pattern_fields", {}).items():
+        all_fields.update(flds)
+    all_fields.update(cfg.get("fallback_fields", []))
+    unresolved = sorted(all_fields - resolved_fields)
+    ai_hits = run_ai_fallback(text, unresolved)
+    for field, hits in ai_hits.items():
+        for h in hits:
+            _add_cand(candidates, field, h["value"], h["method"], h["confidence"], h["source"], h["span"], h["snippet"])
+
+    # 6) Resolve to final fields dict
+    fields = resolve_candidates(candidates)
+
+    return {
+        "record_key": None,              # fill if you compute record keys
+        "overall_trust": round(sum(v["final_confidence"] for v in fields.values())/max(1,len(fields)), 3),
+        "fields": fields,
+        "raw_text": text
+    }
