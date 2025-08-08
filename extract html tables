@@ -1,105 +1,42 @@
-from bs4 import BeautifulSoup
-import re
-
-def _clean_html_for_msg(html: str) -> str:
-    if not html:
-        return ""
-    # Kill Outlook conditional comments & VML junk
-    html = re.sub(r'<!--\[if.*?endif]-->', '', html, flags=re.DOTALL|re.IGNORECASE)
-    html = re.sub(r'<xml>.*?</xml>', '', html, flags=re.DOTALL|re.IGNORECASE)
-    # Normalize <br> to spaces to avoid smashed cells
-    html = re.sub(r'<br\s*/?>', ' ', html, flags=re.IGNORECASE)
-    return html
-
-def _cell_text(td) -> str:
-    txt = td.get_text(" ", strip=True)
-    txt = re.sub(r'\xa0', ' ', txt)  # non-breaking spaces
-    txt = re.sub(r'\s+', ' ', txt).strip()
-    return txt
-
-def extract_html_tables_as_text_from_html(html_body: str) -> str:
+def table_rows_to_text(table_rows):
     """
-    Turn HTML tables in Outlook/MSG HTML into lines like:
-      Header1: Value1, Header2: Value2
-    Works with multiple tables; tolerates missing thead/tbody; tries pandas.read_html first.
+    table_rows: list[list[str]], where table_rows[0] = headers, the rest = rows
+    Returns a single text block: "Header: Value, Header2: Value2" per row.
     """
-    if not html_body:
+    if not table_rows:
         return ""
 
-    html = _clean_html_for_msg(html_body)
-
-    # 1) Try pandas.read_html (great for ugly tables). If not available or fails, fall back to BS4.
-    try:
-        import pandas as pd
-        tables = pd.read_html(html)  # uses lxml under the hood
-        lines = []
-        for df in tables:
-            # Ensure we have string headers
-            df.columns = [str(c).strip() for c in df.columns]
-            # Emit each row as Header: Value pairs
-            for _, row in df.iterrows():
-                kv = []
-                for k, v in row.items():
-                    v_str = "" if (pd.isna(v)) else str(v).strip()
-                    if v_str != "":
-                        kv.append(f"{k}: {v_str}")
-                if kv:
-                    lines.append(", ".join(kv))
-        if lines:
-            return "\n".join(lines)
-        # else fall through to BS4
-    except Exception:
-        pass
-
-    # 2) BeautifulSoup fallback
-    soup = BeautifulSoup(html, "html.parser")
+    headers = [str(h).strip() for h in table_rows[0]]
     lines = []
-
-    for table in soup.find_all("table"):
-        rows = table.find_all("tr")
-        if not rows:
-            continue
-
-        # Find header row: prefer a row with <th>, else first row
-        header_row = None
-        for r in rows:
-            if r.find_all("th"):
-                header_row = r
-                break
-        if header_row is None:
-            header_row = rows[0]
-
-        headers = [_cell_text(c) for c in header_row.find_all(["th", "td"])]
-        headers = [h for h in headers if h]  # drop empties
-
-        # If headers are empty, synthesize positional headers
-        if not headers:
-            # Try next row
-            if len(rows) > 1:
-                probe = [_cell_text(c) for c in rows[1].find_all(["td","th"])]
-                n = len(probe) or 0
-            else:
-                n = 0
-            headers = [f"COL{i+1}" for i in range(n)]
-
-        # Build lines for every subsequent row
-        for r in rows:
-            if r == header_row:
-                continue
-            vals = [_cell_text(c) for c in r.find_all(["td","th"])]
-            if not any(v for v in vals):
-                continue
-
-            # Pad/truncate to match header length
-            if len(vals) < len(headers):
-                vals += [""] * (len(headers) - len(vals))
-            elif len(vals) > len(headers):
-                vals = vals[:len(headers)]
-
-            row_dict = dict(zip(headers, vals))
-            # Keep non-empty values
-            kv = [f"{k}: {v}" for k, v in row_dict.items() if v != ""]
-            if kv:
-                lines.append(", ".join(kv))
-
+    for r in table_rows[1:]:
+        row = [str(x).strip() for x in r]
+        # pad/truncate to header length
+        if len(row) < len(headers):
+            row += [""] * (len(headers) - len(row))
+        elif len(row) > len(headers):
+            row = row[:len(headers)]
+        # zip to dict, drop empties
+        pairs = [f"{h}: {v}" for h, v in zip(headers, row) if v]
+        if pairs:
+            lines.append(", ".join(pairs))
     return "\n".join(lines)
+
+# If you might have multiple tables:
+def all_tables_to_text(html_tables):
+    """
+    html_tables can be:
+      - one table: [headers, row1, row2...]
+      - many tables: [[headers,...],[...], ...]
+    Returns merged text for all tables.
+    """
+    # Detect “list of tables” vs single table
+    is_single = html_tables and all(isinstance(c, str) for c in html_tables[0])
+    tables = [html_tables] if is_single else html_tables
+
+    blocks = []
+    for tbl in tables:
+        blocks.append(table_rows_to_text(tbl))
+    return "\n".join(b for b in blocks if b)
+
+# Usage with your current output:
+text_for_matching = all_tables_to_text(html_tables)
