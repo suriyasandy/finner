@@ -1,0 +1,48 @@
+from collections import defaultdict
+
+def canonicalize(raw, alias_map):
+    canon = alias_map.get(raw.lower())
+    if canon:
+        return canon, 0.95
+    # list hit (not in alias map) — slightly lower
+    return raw, 0.92
+
+def extract_with_gazetteers(text, gazetteers, alias_maps, fuzzy_cfg):
+    """
+    Returns {field: [{value, raw, span, confidence, method}, ...]}
+    """
+    results = defaultdict(list)
+
+    for field, pattern in gazetteers.items():
+        alias_map = alias_maps.get(field, {})
+        # Exact/list matches
+        for m in pattern.finditer(text):
+            raw = m.group(0)
+            canon, conf = canonicalize(raw, alias_map)
+            results[field].append({
+                "value": canon,
+                "raw": raw,
+                "span": (m.start(), m.end()),
+                "confidence": conf,
+                "method": "gazetteer_exact" if conf >= 0.93 else "gazetteer_list",
+            })
+
+        # Optional fuzzy (only if none found)
+        fcfg = fuzzy_cfg.get(field, {})
+        if not results[field] and fcfg.get("enabled", False):
+            cand_values = list({*alias_map.values()})
+            if cand_values:
+                from rapidfuzz import process, fuzz
+                best, score, _ = process.extractOne(text, cand_values, scorer=fuzz.partial_ratio)
+                if score >= int(fcfg.get("threshold", 85)):
+                    idx = text.lower().find(best.lower())
+                    span = (idx, idx + len(best)) if idx >= 0 else (0, 0)
+                    results[field].append({
+                        "value": best,
+                        "raw": best,
+                        "span": span,
+                        "confidence": score / 100.0,
+                        "method": "gazetteer_fuzzy",
+                    })
+
+    return dict(results)
