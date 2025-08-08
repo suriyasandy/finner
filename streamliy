@@ -1,0 +1,50 @@
+# review_app.py
+import streamlit as st
+import spacy
+from spacy import displacy
+from pipeline import run_pipeline
+
+st.set_page_config(page_title="GFXCASH Extraction Review", layout="wide")
+st.title("GFXCASH Extraction Review")
+
+csv_path = st.text_input("Path to gfxcash_data.csv", "gfxcash_data.csv")
+config_path = st.text_input("Path to config_gfxcash.yml", "config_gfxcash.yml")
+
+tab1, tab2 = st.tabs(["Review", "displaCy"])
+
+uploaded = st.file_uploader("Upload .msg/.html/.txt/.pdf/.png/.jpg", type=["msg","html","txt","pdf","png","jpg"])
+
+text_input = st.text_area("Or paste raw HTML/text here", height=200)
+
+if st.button("Run Extraction"):
+    source = text_input if text_input.strip() else (uploaded.name if uploaded else None)
+    if not source and uploaded:
+        # save uploaded file to temp path
+        import tempfile, os
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        tmp.write(uploaded.read()); tmp.flush()
+        source = tmp.name
+
+    if not source:
+        st.warning("Provide a file or paste text.")
+    else:
+        result = run_pipeline(source, csv_path, config_path)
+
+        with tab1:
+            st.subheader(f"Overall trust: {result['overall_trust']:.2f}")
+            for field, data in result["fields"].items():
+                color = "🟢" if data["state"]=="auto_accept" else "🟡" if data["state"]=="needs_review" else "🔴"
+                st.markdown(f"{color} **{field}** → `{data['value']}` *(conf {data['final_confidence']:.2f}, {data['method']})*")
+                with st.expander("Evidence"):
+                    for ev in data["evidence"]:
+                        st.code(ev["snippet"])
+
+        with tab2:
+            st.subheader("displaCy view (spaCy NER)")
+            try:
+                nlp = spacy.load("en_core_web_sm")
+            except Exception:
+                nlp = spacy.blank("en")
+            doc = nlp(result["raw_text"])
+            html = displacy.render(doc, style="ent", page=False)
+            st.markdown(html, unsafe_allow_html=True)
