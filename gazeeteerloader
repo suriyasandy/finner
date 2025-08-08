@@ -1,0 +1,39 @@
+import json, re
+from copy import deepcopy
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    out = deepcopy(base)
+    for k, v in overlay.items():
+        if k not in out:
+            out[k] = deepcopy(v); continue
+        if isinstance(v, dict) and isinstance(out[k], dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = deepcopy(v)
+    return out
+
+def load_gazetteers_from_json(common_path: str, product_path: str):
+    with open(common_path, "r", encoding="utf-8") as f:
+        common = json.load(f)
+    with open(product_path, "r", encoding="utf-8") as f:
+        prod = json.load(f)
+
+    spec = _deep_merge(common, prod)
+
+    gazetteers = {}
+    alias_maps = {}
+    fuzzy_cfg = {}
+
+    for field, meta in spec.items():
+        values = meta.get("values", [])
+        alias_map = meta.get("alias_map", {})
+        fuzzy = meta.get("fuzzy", {"enabled": False, "threshold": 85})
+
+        escaped = [re.escape(v) for v in values if isinstance(v, str) and v]
+        pattern = re.compile(r"(?<!\w)(" + "|".join(escaped) + r")(?!\w)", re.IGNORECASE) if escaped else re.compile(r"$^")
+
+        gazetteers[field] = pattern
+        alias_maps[field] = {k.lower(): v for k, v in alias_map.items()}
+        fuzzy_cfg[field] = {"enabled": bool(fuzzy.get("enabled", False)),
+                            "threshold": int(fuzzy.get("threshold", 85))}
+    return gazetteers, alias_maps, fuzzy_cfg, spec
