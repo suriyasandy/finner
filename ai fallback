@@ -1,4 +1,3 @@
-# nlp/ai_fallback.py
 import re, spacy
 from typing import List, Tuple, Optional, Dict
 
@@ -50,8 +49,8 @@ LABEL_PREFS: Dict[str, List[str]] = {
     "business_date": ["DATE"], "trade_date": ["DATE"], "settlement_date": ["DATE"],
     "market_rate_datetime": ["DATE","TIME"],
     "legal_entity": ["ORG"], "counterparty_acronym": ["ORG","PERSON"],
-    "region_code": ["GPE","LOC"], "pnl_amount": ["MONEY","CARDINAL"],
-    "commission_amount": ["MONEY","CARDINAL"],
+    "region_code": ["GPE","LOC"],
+    "pnl_amount": ["MONEY","CARDINAL"], "commission_amount": ["MONEY","CARDINAL"],
     "deviation_percent": ["PERCENT"],
 }
 
@@ -68,7 +67,6 @@ def _collect(doc, field, text):
     if "percent" in field: cands += _spans(RE_PERCENT, text)
     if "amount" in field or "notional" in field: cands += _spans(RE_AMOUNT, text)
     if field.endswith("_ccy") or field.endswith("_currency_cd"): cands += _spans(RE_CCY, text)
-    # dedupe
     seen, out = set(), []
     for s,e,t in cands:
         if (s,e) in seen: continue
@@ -76,11 +74,9 @@ def _collect(doc, field, text):
     return out
 
 def _anchors_positions(text, anchors):
-    pos = []
-    low = text.lower()
+    pos, low = [], text.lower()
     for a in anchors:
-        start = 0
-        a = a.lower()
+        start = 0; a = a.lower()
         while True:
             i = low.find(a, start)
             if i < 0: break
@@ -102,7 +98,6 @@ def call_mrc_model(context: str, field: str):
     best, best_score = None, -1
     for s,e,t in cands:
         sc = _score(aps, (s,e))
-        # exact-type boosts
         if "percent" in field and RE_PERCENT.fullmatch(t.strip()): sc += 0.05
         if ("amount" in field or "notional" in field) and RE_AMOUNT.fullmatch(t.strip()): sc += 0.05
         if "date" in field and RE_DATE.fullmatch(t.strip()): sc += 0.05
