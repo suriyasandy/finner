@@ -1,0 +1,41 @@
+from typing import Dict, List
+
+def _state(score: float) -> str:
+    if score >= 0.90: return "auto_accept"
+    if score >= 0.70: return "needs_review"
+    return "likely_wrong"
+
+def _clamp(x: float, lo=0.0, hi=1.0) -> float:
+    return max(lo, min(hi, x))
+
+def resolve_candidates(candidates: Dict[str, List[dict]]) -> Dict[str, dict]:
+    """
+    candidates[field] = [{value, method, conf, source, span, snippet, extras}]
+    """
+    results = {}
+    for field, cands in candidates.items():
+        if not cands: 
+            continue
+
+        # Cross-source agreement boost
+        value_counts = {}
+        for c in cands:
+            value_counts[c["value"]] = value_counts.get(c["value"], 0) + 1
+
+        boosted = []
+        for c in cands:
+            boost = 0.05 if value_counts.get(c["value"], 0) >= 2 else 0.0
+            c2 = dict(c); c2["conf"] = _clamp(c["conf"] + boost)
+            boosted.append(c2)
+
+        best = max(boosted, key=lambda x: x["conf"])
+
+        results[field] = {
+            "value": best["value"],
+            "final_confidence": round(best["conf"], 3),
+            "state": _state(best["conf"]),
+            "method": best["method"],
+            "evidence": boosted,
+            "alternates": sorted([c for c in boosted if c is not best], key=lambda x: x["conf"], reverse=True)[:5]
+        }
+    return results
