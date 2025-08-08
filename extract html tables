@@ -1,0 +1,31 @@
+from bs4 import BeautifulSoup
+from typing import List
+
+def extract_html_tables_as_text(html: str) -> str:
+    """
+    Parses HTML content and extracts all tables as header:value pairs in text form.
+    Each row becomes a comma-separated list of key:value.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    tables = soup.find_all("table")
+    all_text_lines = []
+
+    for table in tables:
+        rows = []
+        for tr in table.find_all("tr"):
+            cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+            if cells:
+                rows.append(cells)
+
+        if not rows:
+            continue
+
+        # Use first row as header
+        headers = rows[0]
+        for row in rows[1:]:
+            row_dict = dict(zip(headers, row))
+            # Convert dict to "Header: Value" format
+            line = ", ".join(f"{k}: {v}" for k, v in row_dict.items())
+            all_text_lines.append(line)
+
+    return "\n".join(all_text_lines)
