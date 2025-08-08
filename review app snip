@@ -1,0 +1,7 @@
+fields_view = result.get("fields_max", result["fields"])
+for field, info in fields_view.items():
+    state = info.get("state", "needs_review")
+    conf  = info.get("confidence", info.get("final_confidence", 0.0))
+    val   = info.get("value")
+    icon = "🟢" if state=="auto_accept" else "🟡" if state=="needs_review" else "🔴"
+    st.markdown(f"{icon} **{field}** → `{val}` (conf {conf:.2f})")
