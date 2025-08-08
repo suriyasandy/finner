@@ -1,0 +1,29 @@
+import streamlit as st
+import spacy
+from spacy import displacy
+
+from pipeline import extract_entities_with_confidence
+
+# Load trained local spaCy model
+nlp = spacy.load("./models/gfxcash_model")
+
+st.set_page_config(layout="wide")
+st.title("Trade Entity Extraction Review")
+
+uploaded_file = st.file_uploader("Upload .msg / .txt", type=["msg", "txt"])
+if uploaded_file:
+    text = uploaded_file.read().decode("utf-8", errors="ignore")
+    
+    # Run your hybrid extractor
+    results = extract_entities_with_confidence(text)
+    
+    # Show traffic light table
+    st.subheader("Extraction Confidence Summary")
+    for field, data in results["fields"].items():
+        color = "🟢" if data["state"]=="auto_accept" else "🟡" if data["state"]=="needs_review" else "🔴"
+        st.markdown(f"{color} **{field}** → {data['value']} (conf {data['final_confidence']:.2f})")
+    
+    # Show NER highlights using displaCy
+    doc = nlp(text)
+    html = displacy.render(doc, style="ent", page=False)
+    st.markdown(html, unsafe_allow_html=True)
