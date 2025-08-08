@@ -1,0 +1,224 @@
+# nlp/ai_fallback.py
+# spaCy-powered "MRC-like" fallback:
+# - finds anchor phrases per field
+# - uses spaCy NER + regex to collect candidate spans
+# - picks the span closest to the anchor mention
+
+from typing import List, Tuple, Optional, Dict
+import re
+import spacy
+
+# ---- Load spaCy once (use a local model you already have) ----
+# Prefer a model with NER (e.g., en_core_web_sm or your custom one).
+# If you have vectors (lg model), similarity will work better—optional.
+try:
+    NLP = spacy.load("en_core_web_sm", disable=[])
+except Exception:
+    # Last resort: blank pipeline (NER won't be available)
+    NLP = spacy.blank("en")
+
+# ---- Regex helpers ----
+RE_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{2}[-/]\d{2}[-/]\d{4}\b")
+RE_PERCENT = re.compile(r"-?\d+(?:\.\d+)?\s*%|-?\d+(?:\.\d+)?\s*percent", re.I)
+RE_AMOUNT = re.compile(
+    r"\b([A-Z]{3})\s?\d{1,3}(?:,\d{3})*(?:\.\d+)?\b|\b\d{1,3}(?:,\d{3})*(?:\.\d+)?\s?([A-Z]{3})\b"
+)
+RE_CCY = re.compile(r"\b[A-Z]{3}\b")
+
+# ---- Field -> anchor terms (expand as needed) ----
+ANCHORS: Dict[str, List[str]] = {
+    "business_date": ["business date", "cob", "cob date"],
+    "trade_date": ["trade date"],
+    "settlement_date": ["settlement date", "value date"],
+    "market_rate_datetime": ["market rate time", "rate timestamp", "market timestamp"],
+
+    "legal_entity": ["legal entity", "le"],
+    "counterparty_acronym": ["counterparty", "cp", "cpty"],
+    "book": ["book", "fxcashbook"],
+    "region_code": ["region"],
+    "timezone": ["time zone", "timezone"],
+    "source_system": ["source system"],
+    "originating_system": ["originating system"],
+
+    "pnl_amount": ["pnl", "profit", "p&l"],
+    "commission_amount": ["commission"],
+    "commission_ccy": ["commission ccy"],
+    "pnl_ccy": ["pnl ccy"],
+    "base_currency_cd": ["base currency"],
+    "orig_currency_cd": ["originating currency", "orig currency"],
+
+    "deviation_percent": ["deviation", "deviation percent"],
+    "base_threshold_percent": ["base threshold"],
+    "orig_threshold_percent": ["original threshold", "orig threshold"],
+
+    "execution_key": ["execution key"],
+    "trade_id": ["trade id", "tradeid"],
+    "efx_trade_id": ["efx trade id", "efx id"],
+    "representative_key": ["representative key"],
+    "record_type": ["record type"],
+    "trade_type": ["trade type"],
+    "alert_description": ["alert description", "alert", "reason"],
+    "hms_book_guid": ["hms book guid"],
+    "bui_value": ["bui value"],
+    "notional_range": ["notional range"],
+    "tenor": ["tenor"],
+}
+
+# ---- Which NER labels to trust for each field ----
+LABEL_PREFS: Dict[str, List[str]] = {
+    "business_date": ["DATE"],
+    "trade_date": ["DATE"],
+    "settlement_date": ["DATE"],
+    "market_rate_datetime": ["DATE", "TIME"],
+
+    "legal_entity": ["ORG"],
+    "counterparty_acronym": ["ORG", "PERSON"],  # banks often 2–3 letters (ORG may miss)
+    "book": [],  # usually regex/gazetteer does this; here we rely on anchors + token window
+    "region_code": ["GPE", "LOC"],
+    "timezone": [],
+
+    "pnl_amount": ["MONEY", "CARDINAL"],
+    "commission_amount": ["MONEY", "CARDINAL"],
+    "commission_ccy": [],
+    "pnl_ccy": [],
+    "base_currency_cd": [],
+    "orig_currency_cd": [],
+
+    "deviation_percent": ["PERCENT"],
+    "base_threshold_percent": ["PERCENT"],
+    "orig_threshold_percent": ["PERCENT"],
+
+    "execution_key": ["CARDINAL", "ORG", "PRODUCT"],
+    "trade_id": ["CARDINAL"],
+    "efx_trade_id": ["CARDINAL"],
+    "representative_key": ["CARDINAL"],
+    "record_type": [],
+    "trade_type": [],
+    "alert_description": [],
+    "hms_book_guid": ["CARDINAL"],
+    "bui_value": ["CARDINAL"],
+    "notional_range": [],
+    "tenor": []
+}
+
+def _spans_from_regex(text: str, rx: re.Pattern) -> List[Tuple[int, int, str]]:
+    return [(m.start(), m.end(), m.group(0)) for m in rx.finditer(text)]
+
+def _collect_candidates(doc, field: str, text: str) -> List[Tuple[int, int, str]]:
+    cands = []
+
+    # 1) NER-based candidates
+    label_whitelist = LABEL_PREFS.get(field, [])
+    if hasattr(doc, "ents") and doc.ents:
+        for ent in doc.ents:
+            if not label_whitelist or ent.label_ in label_whitelist:
+                cands.append((ent.start_char, ent.end_char, ent.text))
+
+    # 2) Regex hints per field
+    if "date" in field:
+        cands += _spans_from_regex(text, RE_DATE)
+    if "percent" in field:
+        cands += _spans_from_regex(text, RE_PERCENT)
+    if "amount" in field or "notional" in field:
+        cands += _spans_from_regex(text, RE_AMOUNT)
+    if field.endswith("_ccy") or field.endswith("_currency_cd"):
+        cands += _spans_from_regex(text, RE_CCY)
+
+    # De-duplicate (by span)
+    uniq = {}
+    for s, e, t in cands:
+        uniq[(s, e)] = t
+    return [(s, e, t) for (s, e), t in uniq.items()]
+
+def _anchor_positions(doc, anchors: List[str]) -> List[int]:
+    pos = []
+    lower = doc.text.lower()
+    for a in anchors:
+        start = 0
+        pattern = a.lower()
+        while True:
+            idx = lower.find(pattern, start)
+            if idx == -1:
+                break
+            pos.append(idx)
+            start = idx + len(pattern)
+    return pos
+
+def _score_candidate(anchor_pos: List[int], cand_span: Tuple[int, int]) -> float:
+    if not anchor_pos:
+        # No anchor hit: low confidence, but still return something if strong regex/NER
+        return 0.55
+    s, e = cand_span
+    # Distance to closest anchor (char distance)
+    d = min(abs(s - ap) for ap in anchor_pos)
+    # Convert to score in [0.6, 0.9]
+    score = max(0.6, min(0.9, 0.9 - (d / 500.0)))
+    return score
+
+def _pick_best(text: str, field: str, anchors: List[str]) -> Tuple[Optional[str], float, Tuple[int, int]]:
+    doc = NLP(text)
+    cands = _collect_candidates(doc, field, text)
+    if not cands:
+        return None, 0.0, (0, 0)
+
+    aps = _anchor_positions(doc, anchors) if anchors else []
+    best = None
+    best_score = -1.0
+
+    for s, e, t in cands:
+        score = _score_candidate(aps, (s, e))
+        # small boost if exact token pattern matches field type
+        if "percent" in field and RE_PERCENT.fullmatch(t.strip()):
+            score += 0.05
+        if ("amount" in field or "notional" in field) and RE_AMOUNT.fullmatch(t.strip()):
+            score += 0.05
+        if ("date" in field) and RE_DATE.fullmatch(t.strip()):
+            score += 0.05
+
+        if score > best_score:
+            best = (t, score, (s, e))
+            best_score = score
+
+    if best is None:
+        return None, 0.0, (0, 0)
+    return best
+
+def call_mrc_model(context: str, question: str):
+    """
+    "MRC-like" inference using spaCy NER + regex near anchor terms.
+    Returns (value, confidence, (start, end)).
+    """
+    field = question.replace("?", "").lower().strip()
+    # naive field normalization: map question to our keys by substring
+    # You likely call this with exact field names already; if so, skip this mapping.
+    key = None
+    for k in ANCHORS.keys():
+        if k.replace("_", " ") in field:
+            key = k
+            break
+    if key is None:
+        # fallback: just try to find any strong candidate
+        key = "alert_description"
+
+    anchors = ANCHORS.get(key, [])
+    value, conf, span = _pick_best(context, key, anchors)
+    return value, conf, span
+
+
+def run_ai_fallback(text: str, fields: List[str]):
+    """
+    Loop over unresolved field names, use anchors for each, and return
+    a dict: {field: [{value, raw, span, confidence}]}
+    """
+    results = {}
+    for field in fields:
+        anchors = ANCHORS.get(field, [field.replace("_", " ")])
+        value, conf, span = _pick_best(text, field, anchors)
+        if value:
+            results[field] = [{
+                "value": value,
+                "raw": value,
+                "span": span,
+                "confidence": round(conf, 3)
+            }]
+    return results
