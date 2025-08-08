@@ -1,0 +1,4 @@
+from grouping import group_entities_by_trade
+result = {"product": cfg.get("product"), "overall_trust": overall, "fields": fields, "raw_text": text}
+result = group_entities_by_trade(result, anchor_field="trade_id", fallback_anchor="execution_key", proximity_window=300)
+return result
