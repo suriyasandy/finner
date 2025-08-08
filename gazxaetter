@@ -1,0 +1,23 @@
+import re
+
+def build_gazetteers_from_csv(csv_path):
+    gazetteers = {}
+    alias_maps = {}
+
+    import pandas as pd
+    df = pd.read_csv(csv_path)
+
+    for field in df.columns:
+        values = df[field].dropna().unique().tolist()
+
+        # Compile case-insensitive regex pattern for all possible values
+        escaped_values = [re.escape(v) for v in values if isinstance(v, str)]
+        if escaped_values:
+            pattern = re.compile(r"\b(" + "|".join(escaped_values) + r")\b", re.IGNORECASE)
+        else:
+            pattern = re.compile(r"$^")  # Matches nothing
+
+        gazetteers[field] = pattern
+        alias_maps[field] = {v.lower(): v for v in values if isinstance(v, str)}
+
+    return gazetteers, alias_maps
