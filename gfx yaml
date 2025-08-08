@@ -1,0 +1,59 @@
+product: GFXCASH
+
+gazetteer_json:
+  common: gazetteers/common.json
+  product: gazetteers/gfxcash.json
+
+# keep the same groupings you used before
+field_groups:
+  gazetteer_fields:
+    - account_key
+    - region_code
+    - timezone
+    - counterparty_acronym
+    - book
+    - source_system
+    - legal_entity
+    - trade_type
+    - commission_ccy
+    - pnl_ccy
+    - market_rate_source
+    - market_rate_2
+    - market_fx_swap_points_source
+    - originating_system
+
+  pattern_fields:
+    dates:
+      - business_date
+      - trade_date
+      - settlement_date
+      - market_rate_datetime
+    percents:
+      - base_threshold_percent
+      - orig_threshold_percent
+      - deviation_percent
+    amounts:
+      - base_currency_prin_amount
+      - orig_currency_prin_amount
+      - commission_amount
+      - pnl_amount
+    currencies:
+      - base_currency_cd
+      - orig_currency_cd
+
+  derived_fields:
+    - notional_with_ccy
+    - ccy_pair
+
+  fallback_fields:
+    - execution_key
+    - record_type
+    - comment
+    - trade_id
+    - efx_trade_id
+    - representative_key
+    - notional_range
+    - tenor
+    - alert_description
+    - hms_book_guid
+    - bui_value
