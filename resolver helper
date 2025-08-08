@@ -1,0 +1,24 @@
+def extract_max_conf_per_field(fields: dict) -> dict:
+    """
+    From resolved fields dict, return a new dict:
+    { field: {"value": ..., "confidence": ...} }
+    Only keeps the top confidence value per field.
+    """
+    result = {}
+    for field, info in fields.items():
+        if not info:
+            continue
+        if isinstance(info, dict) and "value" in info:
+            # Already resolved to single value
+            result[field] = {
+                "value": info["value"],
+                "confidence": info.get("final_confidence", 0.0)
+            }
+        elif isinstance(info, list):
+            # If list of candidates, pick max confidence
+            best = max(info, key=lambda x: x.get("conf", 0.0))
+            result[field] = {
+                "value": best.get("value"),
+                "confidence": best.get("conf", 0.0)
+            }
+    return result
