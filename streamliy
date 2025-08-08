@@ -1,50 +1,37 @@
-# review_app.py
 import streamlit as st
-import spacy
-from spacy import displacy
+import json
+import yaml
 from pipeline import run_pipeline
 
-st.set_page_config(page_title="GFXCASH Extraction Review", layout="wide")
-st.title("GFXCASH Extraction Review")
+st.set_page_config(page_title="Entity Extraction Review", layout="wide")
 
-csv_path = st.text_input("Path to gfxcash_data.csv", "gfxcash_data.csv")
-config_path = st.text_input("Path to config_gfxcash.yml", "config_gfxcash.yml")
+st.title("📄 Intelligent Financial Entity Extraction")
+st.caption("JSON gazetteers + regex + spaCy fallback + resolver")
 
-tab1, tab2 = st.tabs(["Review", "displaCy"])
+config_path = st.text_input("Config YAML Path", "config_gfxcash.yml")
+input_file = st.file_uploader("Upload file (HTML, .msg parsed HTML, image, PDF, or text)", type=None)
 
-uploaded = st.file_uploader("Upload .msg/.html/.txt/.pdf/.png/.jpg", type=["msg","html","txt","pdf","png","jpg"])
+if st.button("Run Extraction") and input_file:
+    # Save uploaded file temporarily
+    tmp_path = f"/tmp/{input_file.name}"
+    with open(tmp_path, "wb") as f:
+        f.write(input_file.read())
 
-text_input = st.text_area("Or paste raw HTML/text here", height=200)
+    result = run_pipeline(tmp_path, config_path)
 
-if st.button("Run Extraction"):
-    source = text_input if text_input.strip() else (uploaded.name if uploaded else None)
-    if not source and uploaded:
-        # save uploaded file to temp path
-        import tempfile, os
-        tmp = tempfile.NamedTemporaryFile(delete=False)
-        tmp.write(uploaded.read()); tmp.flush()
-        source = tmp.name
+    st.subheader("Overall Trust Score")
+    st.progress(result["overall_trust"])
+    st.write(f"{result['overall_trust']*100:.1f}%")
 
-    if not source:
-        st.warning("Provide a file or paste text.")
-    else:
-        result = run_pipeline(source, csv_path, config_path)
-
-        with tab1:
-            st.subheader(f"Overall trust: {result['overall_trust']:.2f}")
-            for field, data in result["fields"].items():
-                color = "🟢" if data["state"]=="auto_accept" else "🟡" if data["state"]=="needs_review" else "🔴"
-                st.markdown(f"{color} **{field}** → `{data['value']}` *(conf {data['final_confidence']:.2f}, {data['method']})*")
-                with st.expander("Evidence"):
-                    for ev in data["evidence"]:
-                        st.code(ev["snippet"])
-
-        with tab2:
-            st.subheader("displaCy view (spaCy NER)")
-            try:
-                nlp = spacy.load("en_core_web_sm")
-            except Exception:
-                nlp = spacy.blank("en")
-            doc = nlp(result["raw_text"])
-            html = displacy.render(doc, style="ent", page=False)
-            st.markdown(html, unsafe_allow_html=True)
+    st.subheader("Fields")
+    for field, info in result["fields"].items():
+        state = info["state"]
+        if state == "auto_accept":
+            color = "✅"
+        elif state == "needs_review":
+            color = "⚠️"
+        else:
+            color = "❌"
+        st.markdown(f"**{field}** {color} — `{info['value']}` ({info['final_confidence']*100:.1f}%)")
+        with st.expander("Evidence"):
+            st.json(info["evidence"], expanded=False)
