@@ -1,29 +1,31 @@
 from bs4 import BeautifulSoup
-from typing import List
 
 def extract_html_tables_as_text(html: str) -> str:
     """
-    Parses HTML content and extracts all tables as header:value pairs in text form.
-    Each row becomes a comma-separated list of key:value.
+    Parses HTML content and extracts all tables as header:value text lines.
+    Handles multiple tables in one HTML string.
     """
     soup = BeautifulSoup(html, "html.parser")
     tables = soup.find_all("table")
     all_text_lines = []
 
     for table in tables:
-        rows = []
-        for tr in table.find_all("tr"):
-            cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-            if cells:
-                rows.append(cells)
-
+        rows = table.find_all("tr")
         if not rows:
             continue
 
-        # Use first row as header
-        headers = rows[0]
+        # Extract header row
+        header_cells = [cell.get_text(strip=True) for cell in rows[0].find_all(["td", "th"])]
+        if not header_cells:
+            continue
+
+        # Process each data row
         for row in rows[1:]:
-            row_dict = dict(zip(headers, row))
+            value_cells = [cell.get_text(strip=True) for cell in row.find_all(["td", "th"])]
+            if not value_cells:
+                continue
+            # Align headers with row values
+            row_dict = dict(zip(header_cells, value_cells))
             # Convert dict to "Header: Value" format
             line = ", ".join(f"{k}: {v}" for k, v in row_dict.items())
             all_text_lines.append(line)
