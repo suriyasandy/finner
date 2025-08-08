@@ -1,0 +1,34 @@
+import pandas as pd
+import json
+from collections import defaultdict
+
+def csv_to_gazetteer_json(csv_path, json_path, fuzzy_enabled=False, fuzzy_threshold=85):
+    df = pd.read_csv(csv_path)
+
+    gazetteer_dict = {}
+
+    for col in df.columns:
+        # Get unique values and drop empty
+        values = sorted(set(v for v in df[col].dropna().unique() if isinstance(v, str) and v.strip()))
+
+        # Build alias map: lowercase version → canonical
+        alias_map = {v.lower(): v for v in values}
+
+        gazetteer_dict[col] = {
+            "values": values,
+            "alias_map": alias_map,
+            "fuzzy": {"enabled": fuzzy_enabled, "threshold": fuzzy_threshold}
+        }
+
+    # Save JSON
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(gazetteer_dict, f, indent=2, ensure_ascii=False)
+
+    print(f"✅ Gazetteer JSON saved to {json_path}")
+
+# Example usage:
+# For product-specific CSV
+csv_to_gazetteer_json("gfxcash_gazetteer.csv", "gfxcash.json", fuzzy_enabled=True, fuzzy_threshold=85)
+
+# For common CSV
+# csv_to_gazetteer_json("common_gazetteer.csv", "common.json")
