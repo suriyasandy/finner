@@ -81,4 +81,8 @@ def build_displacy_example(text: str, fields: Dict[str, dict], top_k_per_field: 
     return {"text": text, "ents": ents, "title": None}
 
 def render_to_html(text: str, fields: Dict[str, dict], out_path: str, top_k_per_field: int = 3):
-    example = build_displacy_example(text, fields, top_k_per_field=top_k_per_field
+    example = build_displacy_example(text, fields, top_k_per_field=top_k_per_field)
+    options = {"colors": COLORS}
+    html = displacy.render(example, style="ent", manual=True, options=options, page=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
