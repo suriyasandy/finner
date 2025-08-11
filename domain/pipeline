@@ -1,2 +1,12 @@
 anchors = json.load(open(paths['anchors'], 'r', encoding='utf-8'))
-gaz_hits = extract_with_gazetteers(text, gaz, alias, anchors, anchor_window=windows['anchor_chars'])
+patterns = load_patterns(paths['patterns'])
+
+# context-aware gazetteer extraction (uses anchors)
+gaz_hits = extract_with_gazetteers(
+    text,
+    gazetteers=gaz,
+    alias_maps=alias,
+    anchors=anchors,
+    anchor_window=windows['anchor_chars'],
+    require_anchor=True   # set False if you want to allow context-free gaz hits
+)
