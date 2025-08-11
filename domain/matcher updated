@@ -1,0 +1,63 @@
+import re
+from typing import Dict, List
+
+def extract_with_gazetteers(text: str, gazetteers: Dict[str, List[str]], alias_map: Dict[str, Dict[str, str]], anchors: Dict[str, List[str]], anchor_window: int = 40) -> Dict[str, List[dict]]:
+    """
+    Extract values from text using gazetteers, but filter by nearby anchors to avoid mapping to wrong entities.
+    
+    Parameters:
+    -----------
+    text : str
+        Input text.
+    gazetteers : dict
+        Field -> list of canonical values.
+    alias_map : dict
+        Field -> alias term (lowercased) -> canonical value.
+    anchors : dict
+        Field -> list of anchor phrases for that field.
+    anchor_window : int
+        Number of characters before/after match to search for anchor.
+    """
+    results = {}
+    lower_text = text.lower()
+
+    for field, values in gazetteers.items():
+        field_results = []
+
+        # Build combined list from values + aliases
+        all_terms = set(values) | set(alias_map.get(field, {}).keys())
+        if not all_terms:
+            continue
+
+        escaped_terms = [re.escape(term) for term in sorted(all_terms, key=len, reverse=True)]
+        pattern = re.compile(r"(?<!\w)(" + "|".join(escaped_terms) + r")(?!\w)", re.IGNORECASE)
+
+        for match in pattern.finditer(text):
+            start, end = match.span()
+            matched_value = match.group(0)
+
+            # --- Context filtering with anchors ---
+            keep = True
+            anchor_list = [a.lower() for a in anchors.get(field, [])]
+            if anchor_list:
+                context_start = max(0, start - anchor_window)
+                context_end = min(len(lower_text), end + anchor_window)
+                context_window = lower_text[context_start:context_end]
+
+                if not any(a in context_window for a in anchor_list):
+                    keep = False  # discard if no anchor nearby
+
+            if keep:
+                canonical = alias_map.get(field, {}).get(matched_value.lower(), matched_value)
+                field_results.append({
+                    "value": canonical,
+                    "start": start,
+                    "end": end,
+                    "confidence": 0.9,  # base gazetteer confidence
+                    "source": "gazetteer"
+                })
+
+        if field_results:
+            results[field] = field_results
+
+    return results
