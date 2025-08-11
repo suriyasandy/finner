@@ -22,12 +22,14 @@ out = {
 
 os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
-# NEW: Prodigy JSONL
-prodigy_examples = build_prodigy_examples(text, fields, top_k_per_field=3)
-prodigy_path = os.path.join(os.path.dirname(args.out), "prodigy.jsonl")
-write_jsonl(prodigy_path, prodigy_examples)
+# displacy HTML
+displacy_path = os.path.join(os.path.dirname(args.out), "displacy.html")
+try:
+    render_to_html(text, fields, displacy_path, top_k_per_field=3)
+    print(f"Wrote {displacy_path}  # open in your browser")
+except Exception as e:
+    print(f"[displacy] failed to render: {e}")
 
-# Original JSON
+# JSON result
 json.dump(out, open(args.out, 'w', encoding='utf-8'), indent=2, ensure_ascii=False)
 print(f"Wrote {args.out}")
-print(f"Wrote {prodigy_path}  # Load this in Prodigy")
