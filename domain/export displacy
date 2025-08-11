@@ -1,0 +1,84 @@
+# pipeline/export_displacy.py
+from typing import Dict, List
+from spacy import displacy
+
+# Optional: map internal field names to display labels
+LABEL_MAP = {
+    "legal_entity": "LEGAL_ENTITY",
+    "counterparty_acronym": "COUNTERPARTY",
+    "book": "BOOK",
+    "region_code": "REGION",
+    "timezone": "TIMEZONE",
+    "source_system": "SOURCE_SYSTEM",
+    "originating_system": "ORIGINATING_SYSTEM",
+    "trade_id": "TRADE_ID",
+    "execution_key": "EXECUTION_KEY",
+    "business_date": "BUSINESS_DATE",
+    "trade_date": "TRADE_DATE",
+    "settlement_date": "SETTLEMENT_DATE",
+    "market_rate_datetime": "MARKET_RATE_TIME",
+    "pnl_amount": "PNL_AMOUNT",
+    "commission_amount": "COMMISSION_AMOUNT",
+    "commission_ccy": "COMMISSION_CCY",
+    "pnl_ccy": "PNL_CCY",
+    "base_currency_cd": "BASE_CCY",
+    "orig_currency_cd": "ORIG_CCY",
+    "deviation_percent": "DEVIATION_PCT",
+    "base_threshold_percent": "BASE_THRESHOLD_PCT",
+    "orig_threshold_percent": "ORIG_THRESHOLD_PCT",
+    "record_type": "RECORD_TYPE",
+    "trade_type": "TRADE_TYPE",
+    "alert_description": "ALERT_DESC",
+    "hms_book_guid": "HMS_BOOK_GUID",
+    "bui_value": "BUI_VALUE",
+    "notional_range": "NOTIONAL_RANGE",
+    "tenor": "TENOR",
+}
+
+# Optional colors per label (displacy will default if missing)
+COLORS = {
+    "TRADE_ID": "#feca74",
+    "EXECUTION_KEY": "#feca74",
+    "LEGAL_ENTITY": "#7aecec",
+    "COUNTERPARTY": "#bfeeb7",
+    "BOOK": "#c0a7f3",
+    "BASE_CCY": "#ff9561",
+    "ORIG_CCY": "#ff9561",
+    "PNL_AMOUNT": "#febaef",
+    "BUSINESS_DATE": "#9cc9cc",
+    "TRADE_DATE": "#9cc9cc",
+    "SETTLEMENT_DATE": "#9cc9cc",
+}
+
+def _label(field: str) -> str:
+    return LABEL_MAP.get(field, field.upper())
+
+def _unique_spans(spans: List[dict]) -> List[dict]:
+    seen = set()
+    out = []
+    for s in spans:
+        key = (s["start"], s["end"], s["label"])
+        if key in seen:
+            continue
+        # guard: valid offsets
+        if s["start"] < s["end"]:
+            seen.add(key)
+            out.append(s)
+    return out
+
+def build_displacy_example(text: str, fields: Dict[str, dict], top_k_per_field: int = 3) -> dict:
+    ents = []
+    for field, info in fields.items():
+        evs = info.get("evidence", []) or []
+        for ev in evs[:top_k_per_field]:
+            if "span" not in ev or not isinstance(ev["span"], (list, tuple)) or len(ev["span"]) != 2:
+                continue
+            start, end = int(ev["span"][0]), int(ev["span"][1])
+            if start < 0 or end > len(text) or start >= end:
+                continue
+            ents.append({"start": start, "end": end, "label": _label(field)})
+    ents = _unique_spans(ents)
+    return {"text": text, "ents": ents, "title": None}
+
+def render_to_html(text: str, fields: Dict[str, dict], out_path: str, top_k_per_field: int = 3):
+    example = build_displacy_example(text, fields, top_k_per_field=top_k_per_field
