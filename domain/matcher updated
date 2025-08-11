@@ -1,60 +1,112 @@
+# pipeline/matchers/matcher.py
 import re
-from typing import Dict, List
+from typing import Dict, List, Pattern, Any
 
-def extract_with_gazetteers(text: str, gazetteers: Dict[str, List[str]], alias_map: Dict[str, Dict[str, str]], anchors: Dict[str, List[str]], anchor_window: int = 40) -> Dict[str, List[dict]]:
+def _compile_alias_pattern(alias_keys: List[str]) -> Pattern:
+    if not alias_keys:
+        return re.compile(r"$^")  # match nothing
+    escaped = [re.escape(a) for a in sorted(alias_keys, key=len, reverse=True)]
+    return re.compile(r"(?<!\w)(" + "|".join(escaped) + r")(?!\w)", re.IGNORECASE)
+
+def extract_with_gazetteers(
+    text: str,
+    gazetteers: Dict[str, Pattern],
+    alias_maps: Dict[str, Dict[str, str]],
+    anchors: Dict[str, List[str]],
+    anchor_window: int = 40,
+    require_anchor: bool = True
+) -> Dict[str, List[dict]]:
     """
-    Extract values from text using gazetteers, but filter by nearby anchors to avoid mapping to wrong entities.
-    
-    Parameters:
-    -----------
-    text : str
-        Input text.
-    gazetteers : dict
-        Field -> list of canonical values.
-    alias_map : dict
-        Field -> alias term (lowercased) -> canonical value.
-    anchors : dict
-        Field -> list of anchor phrases for that field.
-    anchor_window : int
-        Number of characters before/after match to search for anchor.
+    Gazetteer extraction with context (anchors) and alias support.
+
+    - gazetteers: field -> compiled re.Pattern (from gazetteer.py)
+    - alias_maps: field -> { alias_lower: canonical }
+    - anchors: field -> [anchor phrases]
+    - require_anchor: if True, keep only matches that have a field anchor nearby
     """
-    results = {}
+    results: Dict[str, List[dict]] = {}
     lower_text = text.lower()
 
-    for field, values in gazetteers.items():
-        field_results = []
-
-        # Build combined list from values + aliases
-        all_terms = set(values) | set(alias_map.get(field, {}).keys())
-        if not all_terms:
+    for field, pattern in gazetteers.items():
+        if not hasattr(pattern, "finditer"):
+            # Defensive: skip if someone passed the wrong type
             continue
 
-        escaped_terms = [re.escape(term) for term in sorted(all_terms, key=len, reverse=True)]
-        pattern = re.compile(r"(?<!\w)(" + "|".join(escaped_terms) + r")(?!\w)", re.IGNORECASE)
+        field_results: List[dict] = []
+        seen_spans = set()
 
-        for match in pattern.finditer(text):
-            start, end = match.span()
-            matched_value = match.group(0)
-
-            # --- Context filtering with anchors ---
-            keep = True
+        # 1) Match canonical values (pattern)
+        for m in pattern.finditer(text):
+            s, e = m.span()
+            raw = m.group(0)
+            # context check
             anchor_list = [a.lower() for a in anchors.get(field, [])]
-            if anchor_list:
-                context_start = max(0, start - anchor_window)
-                context_end = min(len(lower_text), end + anchor_window)
-                context_window = lower_text[context_start:context_end]
+            keep = True
+            if require_anchor:
+                if anchor_list:
+                    c0 = max(0, s - anchor_window)
+                    c1 = min(len(lower_text), e + anchor_window)
+                    ctx = lower_text[c0:c1]
+                    if not any(a in ctx for a in anchor_list):
+                        keep = False
+                else:
+                    # if we require anchor but none defined for this field, drop it
+                    keep = False
 
-                if not any(a in context_window for a in anchor_list):
-                    keep = False  # discard if no anchor nearby
+            if not keep:
+                continue
 
-            if keep:
-                canonical = alias_map.get(field, {}).get(matched_value.lower(), matched_value)
+            canon = alias_maps.get(field, {}).get(raw.lower(), raw)
+            key = (s, e, canon.lower())
+            if key in seen_spans:
+                continue
+            seen_spans.add(key)
+
+            field_results.append({
+                "field": field,
+                "value": canon,
+                "raw": raw,
+                "span": (s, e),
+                "confidence": 0.93 if anchor_list else 0.90,
+                "method": "gazetteer_anchored" if anchor_list else "gazetteer"
+            })
+
+        # 2) Also match aliases explicitly (so aliases work even if not in the compiled pattern)
+        alias_keys = list(alias_maps.get(field, {}).keys())
+        if alias_keys:
+            alias_pat = _compile_alias_pattern(alias_keys)
+            for m in alias_pat.finditer(text):
+                s, e = m.span()
+                raw = m.group(0)
+
+                # context check
+                anchor_list = [a.lower() for a in anchors.get(field, [])]
+                keep = True
+                if require_anchor:
+                    if anchor_list:
+                        c0 = max(0, s - anchor_window)
+                        c1 = min(len(lower_text), e + anchor_window)
+                        ctx = lower_text[c0:c1]
+                        if not any(a in ctx for a in anchor_list):
+                            keep = False
+                    else:
+                        keep = False
+                if not keep:
+                    continue
+
+                canon = alias_maps.get(field, {}).get(raw.lower(), raw)
+                key = (s, e, canon.lower())
+                if key in seen_spans:
+                    continue
+                seen_spans.add(key)
+
                 field_results.append({
-                    "value": canonical,
-                    "start": start,
-                    "end": end,
-                    "confidence": 0.9,  # base gazetteer confidence
-                    "source": "gazetteer"
+                    "field": field,
+                    "value": canon,
+                    "raw": raw,
+                    "span": (s, e),
+                    "confidence": 0.92,   # alias slightly lower than exact
+                    "method": "gazetteer_alias_anchored"
                 })
 
         if field_results:
