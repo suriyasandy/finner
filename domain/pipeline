@@ -1,0 +1,2 @@
+anchors = json.load(open(paths['anchors'], 'r', encoding='utf-8'))
+gaz_hits = extract_with_gazetteers(text, gaz, alias, anchors, anchor_window=windows['anchor_chars'])
