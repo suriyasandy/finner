@@ -1,0 +1,167 @@
+from bs4 import BeautifulSoup
+import re
+
+def _clean_html_for_msg(html):
+    if not html:
+        return ""
+    if isinstance(html, bytes):
+        try:
+            html = html.decode("utf-8", errors="ignore")
+        except Exception:
+            html = html.decode("latin-1", errors="ignore")
+    html = re.sub(r'<!--\[if.*?endif\]-->', '', html, flags=re.DOTALL|re.IGNORECASE)
+    html = re.sub(r'<xml>.*?</xml>', '', html, flags=re.DOTALL|re.IGNORECASE)
+    html = re.sub(r'<br\s*/?>', ' ', html, flags=re.IGNORECASE)
+    return html
+
+def _cell_text(td) -> str:
+    txt = td.get_text(" ", strip=True)
+    txt = re.sub(r'\xa0', ' ', txt)
+    txt = re.sub(r'\s+', ' ', txt).strip()
+    return txt
+
+def _looks_like_label(s: str) -> bool:
+    if not s: return False
+    s = s.strip()
+    # short-ish and mostly alphabetic, or ends with colon
+    return s.endswith(":") or (len(s) <= 30 and re.match(r'^[A-Za-z][A-Za-z0-9 _/().-]*$', s) is not None)
+
+def _flatten_headers(cols):
+    # flatten multi-index headers into single strings
+    out = []
+    for c in cols:
+        if isinstance(c, tuple):
+            s = " ".join(str(x).strip() for x in c if str(x).strip() not in ("", "None"))
+        else:
+            s = str(c).strip()
+        out.append(s)
+    return out
+
+def _drop_bad_cols(df):
+    # drop unnamed/index-like columns introduced by read_html
+    bad = [c for c in df.columns if re.match(r'(?i)^unnamed:?\s*\d*$', str(c)) or str(c).strip() == ""]
+    if bad:
+        df = df.drop(columns=bad, errors="ignore")
+    return df
+
+def extract_html_tables_as_text_from_html(html_body: str) -> str:
+    if not html_body:
+        return ""
+    html = _clean_html_for_msg(html_body)
+
+    # ---------- Try pandas.read_html (best at messy tables) ----------
+    try:
+        import pandas as pd
+        # read all tables; pandas guesses header row; we'll repair as needed
+        tables = pd.read_html(html, flavor="lxml")
+        lines = []
+        for df in tables:
+            # flatten headers
+            df.columns = _flatten_headers(df.columns)
+            df = _drop_bad_cols(df)
+
+            # if headers are numeric/generic, see if first row is actually the header row
+            generic_headers = all(re.match(r'^\d+$', str(c)) or str(c).upper().startswith("COL") for c in df.columns)
+            if generic_headers and len(df) > 0:
+                first = df.iloc[0].astype(str).tolist()
+                if sum(_looks_like_label(x) for x in first) >= max(1, int(0.6 * len(first))):
+                    df.columns = [x.rstrip(":").strip() for x in first]
+                    df = df.iloc[1:].reset_index(drop=True)
+
+            # drop again if new headers created an Unnamed column
+            df = _drop_bad_cols(df)
+
+            # handle classic 2-column key/value tables
+            if df.shape[1] == 2:
+                left, right = df.columns[0], df.columns[1]
+                # many KV tables use generic headers; the content carries labels
+                for _, row in df.iterrows():
+                    k = str(row[left]).strip()
+                    v = "" if pd.isna(row[right]) else str(row[right]).strip()
+                    if k and v:
+                        # strip trailing colon in key if present
+                        if k.endswith(":"): k = k[:-1].strip()
+                        lines.append(f"{k}: {v}")
+                continue
+
+            # general N-column table -> emit header:value for non-empty cells
+            # (skip obvious index-like columns)
+            use_cols = [c for c in df.columns if not re.match(r'(?i)^index$|^#$', str(c))]
+            for _, row in df[use_cols].iterrows():
+                kv = []
+                for k in use_cols:
+                    v = row[k]
+                    if pd.isna(v): 
+                        continue
+                    v_str = str(v).strip()
+                    if v_str == "":
+                        continue
+                    kv.append(f"{str(k).strip()}: {v_str}")
+                if kv:
+                    lines.append(", ".join(kv))
+
+        if lines:
+            return "\n".join(lines)
+    except Exception:
+        pass
+
+    # ---------- BeautifulSoup fallback ----------
+    soup = BeautifulSoup(html, "html.parser")
+    lines = []
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+
+        # try to find an explicit header row
+        header_row = table.find("tr")
+        ths = header_row.find_all("th") if header_row else []
+        if ths:
+            headers = [_cell_text(c) for c in ths if _cell_text(c)]
+            data_rows = rows[1:]
+        else:
+            # no <th>: check if first row is labels (two-col KV or multi-col)
+            cells = rows[0].find_all(["td","th"])
+            ctexts = [_cell_text(c) for c in cells]
+            if len(ctexts) == 2 and all(x for x in ctexts):
+                # treat whole table as KV: each subsequent row is key:value
+                for r in rows:
+                    tds = r.find_all(["td","th"])
+                    if len(tds) >= 2:
+                        k = _cell_text(tds[0]); v = _cell_text(tds[1])
+                        if k.endswith(":"): k = k[:-1].strip()
+                        if k and v:
+                            lines.append(f"{k}: {v}")
+                continue
+            # else: promote first row to header if it looks label-ish
+            if sum(_looks_like_label(x) for x in ctexts) >= max(1, int(0.6 * len(ctexts))):
+                headers = [x.rstrip(":").strip() for x in ctexts]
+                data_rows = rows[1:]
+            else:
+                # fallback: generic headers COL1..n and try KV per row
+                headers = [f"COL{i+1}" for i in range(len(ctexts))]
+                data_rows = rows[1:]
+
+        # now emit header:value rows
+        for r in data_rows:
+            vals = [_cell_text(c) for c in r.find_all(["td","th"])]
+            if not any(vals):
+                continue
+            # align lengths
+            if len(vals) < len(headers):
+                vals += [""] * (len(headers)-len(vals))
+            elif len(vals) > len(headers):
+                vals = vals[:len(headers)]
+            row_dict = dict(zip(headers, vals))
+            # special case: if exactly two columns and left looks like label, output KV
+            if len(headers) == 2 and _looks_like_label(headers[0]):
+                k = headers[0]; v = row_dict.get(headers[1], "")
+                if k.endswith(":"): k = k[:-1].strip()
+                if v:
+                    lines.append(f"{k}: {v}")
+            else:
+                kv = [f"{k}: {v}" for k, v in row_dict.items() if v != ""]
+                if kv:
+                    lines.append(", ".join(kv))
+
+    return "\n".join(lines)
