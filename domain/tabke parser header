@@ -1,0 +1,267 @@
+from bs4 import BeautifulSoup
+import re
+
+# -------------------- helpers --------------------
+
+def _clean_html_for_msg(html):
+    if not html:
+        return ""
+    if isinstance(html, bytes):
+        try:
+            html = html.decode("utf-8", errors="ignore")
+        except Exception:
+            html = html.decode("latin-1", errors="ignore")
+    # strip Outlook cruft & normalize <br>
+    html = re.sub(r'<!--\[if.*?endif\]-->', '', html, flags=re.DOTALL|re.IGNORECASE)
+    html = re.sub(r'<xml>.*?</xml>', '', html, flags=re.DOTALL|re.IGNORECASE)
+    html = re.sub(r'<br\s*/?>', ' ', html, flags=re.IGNORECASE)
+    return html
+
+def _txt(tag) -> str:
+    s = tag.get_text(" ", strip=True)
+    s = s.replace("\xa0", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+def _looks_like_label(s: str) -> bool:
+    """Heuristic for header-like text."""
+    if not s:
+        return False
+    s = s.strip()
+    if s.endswith(":"):
+        return True
+    # shortish and wordy, not just numbers/symbols
+    return (len(s) <= 48) and bool(re.match(r"^[A-Za-z][A-Za-z0-9 _/().%\-]*$", s))
+
+def _mostly_numeric(s: str) -> bool:
+    if not s:
+        return False
+    s = s.strip()
+    # values like 123, 1,234.56, 12%, 2025-08-01 etc count as numeric-ish
+    return bool(re.match(r"^[\d,.\-:/% ]+$", s)) and any(ch.isdigit() for ch in s)
+
+def _normalize_header(s: str) -> str:
+    if not s:
+        return ""
+    s = s.strip()
+    if s.lower().startswith("unnamed"):
+        return ""
+    if s.lower() in {"index", "#"}:
+        return ""
+    if s.endswith(":"):
+        s = s[:-1].strip()
+    return s
+
+# -------------------- grid builder (handles row/col spans) --------------------
+
+def _expand_grid(table):
+    """
+    Build a 2D grid of cell texts, expanding colspan/rowspan so every row has equal length.
+    Returns (grid, tag_grid) where grid is list[list[str]] and tag_grid is list[list[tagname]].
+    """
+    rows = table.find_all("tr")
+    grid, tags = [], []
+
+    # map of positions filled by rowspans: (r, c) -> (text, tagname)
+    carry = {}
+    for r_idx, tr in enumerate(rows):
+        row, tagrow = [], []
+        c_idx = 0
+
+        # fill any carried cells first
+        while (r_idx, c_idx) in carry:
+            t, tn = carry.pop((r_idx, c_idx))
+            row.append(t); tagrow.append(tn)
+            c_idx += 1
+
+        for cell in tr.find_all(["td", "th"]):
+            text = _txt(cell)
+            tagname = cell.name.lower()
+            colspan = int(cell.get("colspan", "1") or 1)
+            rowspan = int(cell.get("rowspan", "1") or 1)
+
+            # seek next free slot if current occupied (rare but safe)
+            while (r_idx, c_idx) in carry:
+                t, tn = carry.pop((r_idx, c_idx))
+                row.append(t); tagrow.append(tn)
+                c_idx += 1
+
+            # place this cell
+            row.append(text); tagrow.append(tagname)
+
+            # fill horizontal span copies
+            for k in range(1, colspan):
+                row.append(text); tagrow.append(tagname)
+
+            # record vertical spans for subsequent rows
+            if rowspan > 1:
+                for rr in range(1, rowspan):
+                    for cc in range(colspan):
+                        carry[(r_idx + rr, c_idx + cc)] = (text, tagname)
+
+            c_idx += colspan
+
+        # append any trailing carried cells that fit after last column index (rare)
+        while (r_idx, c_idx) in carry:
+            t, tn = carry.pop((r_idx, c_idx))
+            row.append(t); tagrow.append(tn)
+            c_idx += 1
+
+        grid.append(row)
+        tags.append(tagrow)
+
+    # normalize widths
+    max_w = max((len(r) for r in grid), default=0)
+    for i in range(len(grid)):
+        if len(grid[i]) < max_w:
+            pad = max_w - len(grid[i])
+            grid[i].extend([""] * pad)
+            tags[i].extend(["td"] * pad)
+
+    return grid, tags
+
+# -------------------- header detection & composition --------------------
+
+def _detect_header_depth(grid, tags, max_header_rows=3):
+    """
+    Detect how many of the top rows are header rows.
+    We treat rows with many <th> or label-like cells as header rows.
+    """
+    depth = 0
+    for i in range(min(max_header_rows, len(grid))):
+        row, tagrow = grid[i], tags[i]
+        if not any(row):
+            break
+        th_ratio = sum(1 for t in tagrow if t == "th") / max(1, len(tagrow))
+        labelish = sum(1 for x in row if _looks_like_label(x)) / max(1, len(row))
+        numericish = sum(1 for x in row if _mostly_numeric(x)) / max(1, len(row))
+
+        # Consider header if there are th's or it's labelish and not numericish
+        if th_ratio >= 0.2 or (labelish >= 0.5 and numericish < 0.5):
+            depth += 1
+        else:
+            break
+    return depth
+
+def _compose_headers(grid, header_depth):
+    """
+    Compose final column names by stacking header rows vertically:
+    For each column j, take unique non-empty pieces from the header rows and join with ' > '.
+    """
+    if header_depth <= 0:
+        return None
+    width = max(len(r) for r in grid)
+    headers = []
+    for j in range(width):
+        parts = []
+        seen = set()
+        for i in range(header_depth):
+            h = _normalize_header(grid[i][j])
+            if not h or h.lower() in seen:
+                continue
+            parts.append(h); seen.add(h.lower())
+        header = " > ".join(parts).strip()
+        headers.append(header)
+    # if ALL headers are empty, return None to trigger other modes
+    if not any(headers):
+        return None
+    return headers
+
+# -------------------- vertical KV detector --------------------
+
+def _is_vertical_kv(grid):
+    """
+    Vertical KV: labels down col0, values in the first non-empty to the right.
+    """
+    if not grid:
+        return False
+    # need at least 2 columns
+    width = max(len(r) for r in grid)
+    if width < 2:
+        return False
+    first_col = [ (r[0] or "").strip() for r in grid if r ]
+    if not first_col:
+        return False
+    ratio = sum(1 for x in first_col if _looks_like_label(x)) / len(first_col)
+    return ratio >= 0.6
+
+def _first_nonempty_to_right(row, start_col=1):
+    for j in range(start_col, len(row)):
+        v = (row[j] or "").strip()
+        if v:
+            return v
+    return ""
+
+# -------------------- main API --------------------
+
+def extract_html_tables_as_text_from_html(html_body: str) -> str:
+    """
+    Return lines like:
+      HeaderA: vA, HeaderB: vB
+      HeaderA: vA2, HeaderB: vB2
+    ...one line per data row; or for vertical KV tables, one line per key:value row.
+    """
+    if not html_body:
+        return ""
+    html = _clean_html_for_msg(html_body)
+    soup = BeautifulSoup(html, "html.parser")
+
+    lines = []
+    for table in soup.find_all("table"):
+        grid, tags = _expand_grid(table)
+        if not grid or not any(any(c.strip() for c in r) for r in grid):
+            continue
+
+        # Mode 1: vertical KV (labels down the first column)
+        if _is_vertical_kv(grid):
+            for r in grid:
+                if not r:
+                    continue
+                k = (r[0] or "").strip()
+                if not _looks_like_label(k):
+                    continue
+                v = _first_nonempty_to_right(r, 1)
+                if not v:
+                    continue
+                if k.endswith(":"):
+                    k = k[:-1].strip()
+                lines.append(f"{k}: {v}")
+            continue
+
+        # Mode 2: multi-row headers at the top -> compose headers and emit rows
+        header_depth = _detect_header_depth(grid, tags, max_header_rows=3)
+        headers = _compose_headers(grid, header_depth) if header_depth > 0 else None
+
+        if headers:
+            width = len(headers)
+
+            # drop unusable columns (empty headers)
+            keep_idx = [j for j, h in enumerate(headers) if h]
+            if not keep_idx:
+                # no usable headers, fallback to row-wise KV
+                pass
+            else:
+                # skip duplicate header rows in the body (tables often repeat headers)
+                body = grid[header_depth:]
+                for r in body:
+                    # skip empty or header-repeat rows
+                    if not any(x.strip() for x in r):
+                        continue
+                    # row -> kv using kept columns only
+                    kv = []
+                    for j in keep_idx:
+                        h = headers[j]
+                        v = (r[j] or "").strip()
+                        if not v or not h:
+                            continue
+                        kv.append(f"{h}: {v}")
+                    if kv:
+                        lines.append(", ".join(kv))
+                continue
+
+        # Mode 3: fallback – try to treat each row as KV if the first cell looks like a label
+        for r in grid:
+            if len(r) >= 2 and _looks_like_label(r[0]) and (r[1] or "").strip():
+                k = r[0][:-1].strip() if r[0].endswith(":") else r[0].strip()
+                lines.append(f"{k}: {r[1].strip()}")
+
+    return "\n".join(lines)
