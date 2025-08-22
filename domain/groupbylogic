@@ -15,10 +15,10 @@ pivot_df = pd.pivot_table(
     columns='ccypair',         # Unique ccypair values on columns
     values='trade_id',         # Count based on trade_id
     aggfunc='count',
-    fill_value=0               # Replace NaN with 0
-)
+    fill_value=0
+).reset_index()
 
-# Reset index if needed
-pivot_df = pivot_df.reset_index()
+# ✅ Drop rows where all ccypair counts are 0
+pivot_df = pivot_df.loc[~(pivot_df.drop(columns=['deviation1']).eq(0).all(axis=1))]
 
 print(pivot_df)
