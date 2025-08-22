@@ -1,0 +1,55 @@
+import pandas as pd
+import numpy as np
+
+# --- Example input (replace with your df) ---
+# df = pd.DataFrame({
+#     'ccypair': ['EURUSD','EURUSD','USDJPY','EURUSD','GBPUSD','USDJPY'],
+#     'deviation1': [0.00003, 0.00012, 0.00021, 0.00055, 0.00008, 0.0012],
+#     'deviation2': [0.00002, 0.00018, 0.00027, 0.00044, 0.00009, 0.0025],
+#     'trade_id': [1,2,3,4,5,6]
+# })
+
+# --- Define your FX bins (edit as you like) ---
+# Include 0 at the start and np.inf at the end to catch all values
+bins = [0, 0.0001, 0.0002, 0.0005, 0.001, np.inf]
+
+def make_binned_pivot(df, dev_col, bins, ccypair_col='ccypair', id_col='trade_id'):
+    # absolute, drop NaNs
+    s = df[dev_col].abs()
+    valid = df.loc[s.notna()].copy()
+    s = s.loc[s.notna()]
+    
+    # bin the deviations; right-closed intervals (.., ]
+    cats = pd.cut(s, bins=bins, right=True, include_lowest=True)
+    valid['bin'] = cats
+
+    # pivot: counts by ccypair within each bin
+    pivot = pd.pivot_table(
+        valid,
+        index='bin',
+        columns=ccypair_col,
+        values=id_col,
+        aggfunc='count',
+        fill_value=0
+    )
+
+    # drop rows where all ccypairs are 0
+    pivot = pivot.loc[~pivot.eq(0).all(axis=1)]
+
+    # optional: sort columns alphabetically and keep bin order
+    pivot = pivot.reindex(sorted(pivot.columns), axis=1)
+
+    # optional: pretty labels for bins
+    pivot.index = pivot.index.astype(str)
+
+    return pivot
+
+# --- Build both pivots ---
+pivot_dev1 = make_binned_pivot(df, 'deviation1', bins)
+pivot_dev2 = make_binned_pivot(df, 'deviation2', bins)
+
+print("Deviation1 (abs) binned counts:")
+print(pivot_dev1, end="\n\n")
+
+print("Deviation2 (abs) binned counts:")
+print(pivot_dev2)
