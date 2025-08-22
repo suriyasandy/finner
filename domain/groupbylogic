@@ -1,0 +1,24 @@
+import pandas as pd
+
+# Example DataFrame
+df = pd.DataFrame({
+    'ccypair': ['EURUSD', 'EURUSD', 'USDJPY', 'EURUSD', 'GBPUSD', 'USDJPY'],
+    'deviation1': ['High', 'Low', 'Medium', 'High', 'Low', 'Medium'],
+    'deviation2': ['X', 'Y', 'Z', 'X', 'Y', 'Z'],
+    'trade_id': [1, 2, 3, 4, 5, 6]
+})
+
+# ✅ Create Pivot Table
+pivot_df = pd.pivot_table(
+    df,
+    index='deviation1',        # Unique deviation1 values on rows
+    columns='ccypair',         # Unique ccypair values on columns
+    values='trade_id',         # Count based on trade_id
+    aggfunc='count',
+    fill_value=0               # Replace NaN with 0
+)
+
+# Reset index if needed
+pivot_df = pivot_df.reset_index()
+
+print(pivot_df)
