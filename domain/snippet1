@@ -1,0 +1,37 @@
+# Clean strings to avoid NaN in boolean masks
+for col in ['reasonCodeId', 'instrument', 'originating_system', 'trade_type']:
+    if col in epe_df.columns:
+        epe_df[col] = epe_df[col].astype(str)  # converts NaN to 'nan'; .str.contains will still be safe with na=False
+
+# 1) Filter out bad reason codes (your existing idea)
+epe_df['reasonCodeId'] = epe_df['reasonCodeId'].fillna('')
+epe_df_filtered = epe_df.loc[~epe_df['reasonCodeId'].str.contains("Market data issue", na=False)]
+
+# 2) Drop rows where Points Price is NaN or 0
+epe_df_filtered = epe_df_filtered.dropna(subset=['Points Price'])
+epe_df_filtered = epe_df_filtered.loc[epe_df_filtered['Points Price'] != 0]
+
+# 3) Keep only FLEXRATE instruments (safe even if NaN exists)
+epe_df_filtered = epe_df_filtered.loc[epe_df_filtered['instrument'].str.contains('FLEXRATE', na=False)]
+
+# 4) Originating system equals 'FLEXRATE' (as in your screenshot)
+epe_df_filtered = epe_df_filtered.loc[epe_df_filtered['originating_system'].eq('FLEXRATE')]
+
+# 5) Keep only duplicated trade ids (if that's intended)
+epe_df_filtered = epe_df_filtered.loc[epe_df_filtered.duplicated(subset=['efx_trade_id'], keep=False)]
+
+# 6) Filter by trade_type (literal match within the string)
+epe_df_filtered = epe_df_filtered.loc[epe_df_filtered['trade_type'].str.contains(trade_type, na=False, regex=False)]
+
+# Final tidy index
+epe_df_filtered = epe_df_filtered.reset_index(drop=True)
+
+# Compute deviations (safe: Points Price not NaN and not zero)
+epe_df_filtered["Deviation_1"] = (
+    (epe_df_filtered['market_fx_swap_points'] - epe_df_filtered['Points Price']).abs()
+    / epe_df_filtered['Points Price']
+)
+epe_df_filtered["Deviation_2"] = (
+    (epe_df_filtered['market_fx_swap_points'] - epe_df_filtered['Points Price'])
+    / epe_df_filtered['Points Price']
+)
