@@ -1,18 +1,15 @@
-import pandas as pd
+output_result = result.get("output_result", []) or []
+    for i, item in enumerate(output_result):
+        if not isinstance(item, dict):
+            continue
+        res_dict = item.get("res")
+        if isinstance(res_dict, dict) and res_dict:
+            # dict-of-dicts to DataFrame (index -> rows)
+            df = pd.DataFrame.from_dict(res_dict, orient="index")
+            # Optional: keep the bbox/type as metadata (one row) – uncomment to include
+            # df.attrs["bbox"] = item.get("bbox")
+            # df.attrs["type"] = item.get("type")
 
-def save_res_to_csv(response, csv_filename="output.csv"):
-    try:
-        # Navigate into the nested res dict
-        res_dict = response['output_result'][0]['res']
-
-        # Convert dict → DataFrame
-        df = pd.DataFrame.from_dict(res_dict, orient="index")
-
-        # Save to CSV
-        df.to_csv(csv_filename, index=False)
-        print(f"CSV saved successfully: {csv_filename}")
-    except Exception as e:
-        print(f"Error: {e}")
-
-# Example usage
-save_res_to_csv(response, "result_table.csv")
+            stem = os.path.splitext(result.get("file_name", "output"))[0]
+            csv_path = os.path.join(out_dir, f"{stem}_table{i}.csv")
+            df.to_csv(csv_path, index=False)
