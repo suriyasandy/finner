@@ -1,0 +1,52 @@
+import base64
+import os
+
+def save_base64_image(resp, image_key="output_image", name_key="file_name", out_path=None):
+    """
+    resp: dict with keys like {"file_name": "...", "output_image": "<base64>"}
+    image_key: key holding the base64 string
+    name_key: key holding the suggested file name
+    out_path: optional explicit path to save to
+    """
+    b64 = str(resp[image_key]).strip()
+
+    # Strip a data URL prefix if present (e.g., "data:image/jpeg;base64,XXXX")
+    if b64.startswith("data:"):
+        b64 = b64.split(",", 1)[1]
+
+    # Fix any missing padding
+    missing_padding = len(b64) % 4
+    if missing_padding:
+        b64 += "=" * (4 - missing_padding)
+
+    # Decide file extension
+    suggested_name = resp.get(name_key, "output.jpg")
+    stem, ext = os.path.splitext(suggested_name)
+    ext = (ext or ".jpg").lower()
+
+    # Heuristic: pick ext from base64 header if not trustworthy
+    if b64.startswith("/9j/"):      # JPEG
+        ext = ".jpg"
+    elif b64.startswith("iVBORw0KGgo"):  # PNG
+        ext = ".png"
+    elif b64.startswith("R0lGOD"):  # GIF
+        ext = ".gif"
+
+    # Final path
+    if out_path is None:
+        out_path = f"{stem}_output{ext}"
+
+    # Write file
+    with open(out_path, "wb") as f:
+        f.write(base64.b64decode(b64))
+
+    return out_path
+
+# -------- Example usage --------
+resp = {
+    "file_name": "Sample.JPG",
+    "output_image": "/9j/4AAQSkZJRgABAQAAAQABAAD/..."  # your base64 string
+}
+
+saved_path = save_base64_image(resp)
+print(f"Saved: {saved_path}")
