@@ -1,0 +1,54 @@
+from typing import Dict, List, Tuple
+import networkx as nx
+
+def _compute_cooccurrence(occurrences: Dict[str, List[dict]]) -> Dict[Tuple[str,str], float]:
+    attr_to_emails = {}
+    max_idx = -1
+    for attr, occs in occurrences.items():
+        idxs = set(int(o["source_idx"]) for o in occs)
+        attr_to_emails[attr] = idxs
+        if idxs:
+            max_idx = max(max_idx, max(idxs))
+    total_emails = max_idx + 1 if max_idx >= 0 else 1
+
+    pair_counts = {}
+    attrs = list(attr_to_emails.keys())
+    for i, a in enumerate(attrs):
+        for b in attrs[i+1:]:
+            ca = attr_to_emails[a]
+            cb = attr_to_emails[b]
+            inter = len(ca.intersection(cb))
+            score = inter / max(1, total_emails)
+            pair_counts[(a,b)] = score
+    return pair_counts
+
+def build_kg_from_similarity_and_cooccurrence(
+    similarity_matrix,
+    occurrences: Dict[str, List[dict]],
+    sim_threshold: float = 0.25,
+    top_k_edges: int = 40
+):
+    G = nx.DiGraph()
+    attrs = list(similarity_matrix.index)
+    for a in attrs:
+        G.add_node(a)
+
+    cooc = _compute_cooccurrence(occurrences)
+
+    edges = []
+    for i, a in enumerate(attrs):
+        for j, b in enumerate(attrs):
+            if j <= i:
+                continue
+            sim = float(similarity_matrix.loc[a, b])
+            if sim < sim_threshold:
+                continue
+            co = cooc.get((a,b), cooc.get((b,a), 0.0))
+            w = 0.7 * sim + 0.3 * co
+            if w > 0:
+                edges.append((a, b, w))
+                edges.append((b, a, w))
+
+    edges = sorted(edges, key=lambda x: x[2], reverse=True)[:top_k_edges]
+    G.add_weighted_edges_from(edges)
+    return G
