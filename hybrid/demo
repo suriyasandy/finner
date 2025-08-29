@@ -1,0 +1,8 @@
+from pipeline import orchestrate
+
+if __name__ == "__main__":
+    results = orchestrate(input_path="sample_data", output_dir="outputs")
+    print("Done. Outputs written to:", results["outputs_dir"])
+    print("Nodes:", results["graph_nodes"])
+    print("Edges (top few):", results["graph_edges"][:10])
+    print("See similarity heatmap and knowledge graph images in outputs/.")
