@@ -1,0 +1,64 @@
+import os, json
+from typing import List, Optional, Dict, Any
+
+from config import Settings
+from ner_extractor import extract_with_ner_and_regex, to_serializable
+from embedding_similarity import compute_similarity_matrix
+from kg_builder import build_kg_from_similarity_and_cooccurrence
+from visualize import plot_similarity_heatmap, plot_knowledge_graph
+
+def _read_text_files_from_dir(path: str) -> List[str]:
+    texts = []
+    for fn in os.listdir(path):
+        p = os.path.join(path, fn)
+        if os.path.isfile(p) and fn.lower().endswith((".txt", ".eml")):
+            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                texts.append(f.read())
+    return texts
+
+def orchestrate(
+    input_path: Optional[str] = None,
+    texts: Optional[List[str]] = None,
+    output_dir: str = "outputs",
+    sim_threshold: float = None,
+    top_k_edges: int = None
+) -> Dict[str, Any]:
+    os.makedirs(output_dir, exist_ok=True)
+    cfg = Settings()
+    if sim_threshold is None: sim_threshold = cfg.sim_threshold
+    if top_k_edges is None: top_k_edges = cfg.top_k_edges
+
+    if texts is None:
+        if input_path is None:
+            raise ValueError("Provide either 'input_path' (folder with .txt/.eml) or 'texts' (list of strings).")
+        texts = _read_text_files_from_dir(input_path)
+
+    extr = extract_with_ner_and_regex(texts=texts, context_window_chars=cfg.context_window_chars)
+    extr_json = to_serializable(extr)
+
+    with open(os.path.join(output_dir, "extractions.json"), "w", encoding="utf-8") as f:
+        json.dump(extr_json, f, ensure_ascii=False, indent=2)
+
+    sim_df = compute_similarity_matrix(extr_json)
+    sim_csv = os.path.join(output_dir, "similarity_matrix.csv")
+    sim_df.to_csv(sim_csv, index=True)
+
+    plot_similarity_heatmap(sim_df, os.path.join(output_dir, "similarity_heatmap.png"))
+
+    G = build_kg_from_similarity_and_cooccurrence(sim_df, extr_json, sim_threshold=sim_threshold, top_k_edges=top_k_edges)
+
+    try:
+        import networkx as nx
+        nx.write_gpickle(G, os.path.join(output_dir, "knowledge_graph.gpickle"))
+    except Exception as e:
+        print("Warning: could not save graph pickle:", e)
+
+    plot_knowledge_graph(G, os.path.join(output_dir, "knowledge_graph.png"))
+
+    return {
+        "extractions": extr_json,
+        "similarity_matrix_path": sim_csv,
+        "graph_nodes": list(G.nodes()),
+        "graph_edges": [(u, v, float(G[u][v]['weight'])) for u, v in G.edges()],
+        "outputs_dir": os.path.abspath(output_dir),
+    }
