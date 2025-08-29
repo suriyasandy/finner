@@ -1,0 +1,20 @@
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class Settings:
+    attributes: List[str] = (
+        "Trade ID",
+        "PnL",
+        "CVA",
+        "RCVA",
+        "FVA",
+        "VA",
+        "Notional",
+        "CurrencyPair",
+        "COB Date",
+        "Trade Date",
+    )
+    context_window_chars: int = 60  # chars left/right for context capture
+    sim_threshold: float = 0.25     # edge threshold on similarity
+    top_k_edges: int = 40           # cap edges for drawing clarity
