@@ -1,0 +1,100 @@
+import os
+import base64
+import json
+import pandas as pd
+
+def process_response(resp: dict, out_dir: str = "."):
+    """
+    resp: {'code': 0, 'result': {...}}
+    out_dir: folder to save files
+    Returns: dict with saved paths
+    """
+    assert 'result' in resp, "Response missing 'result' key"
+    result = resp['result']
+
+    os.makedirs(out_dir, exist_ok=True)
+    saved = {"image": None, "csvs": []}
+
+    # ---------- 1) Save Base64 image ----------
+    b64 = str(result.get("output_image", "")).strip()
+    if b64:
+        # Strip data: prefix if present
+        if b64.startswith("data:"):
+            b64 = b64.split(",", 1)[1]
+        # Fix padding
+        missing = len(b64) % 4
+        if missing:
+            b64 += "=" * (4 - missing)
+
+        # Choose filename
+        file_name = result.get("file_name", "output.jpg")
+        stem, ext = os.path.splitext(file_name)
+
+        # Pick ext by signature if needed
+        if b64.startswith("/9j/"):      # JPEG
+            ext = ".jpg"
+        elif b64.startswith("iVBORw0KGgo"):  # PNG
+            ext = ".png"
+        elif b64.startswith("R0lGOD"):  # GIF
+            ext = ".gif"
+        elif not ext:
+            ext = ".bin"
+
+        img_path = os.path.join(out_dir, f"{stem}_output{ext}")
+        with open(img_path, "wb") as f:
+            f.write(base64.b64decode(b64))
+        saved["image"] = img_path
+
+    # ---------- 2) Save tables in output_result -> res -> CSV ----------
+    output_result = result.get("output_result", []) or []
+    for i, item in enumerate(output_result):
+        if not isinstance(item, dict):
+            continue
+
+        res_data = item.get("res")
+        if not res_data:
+            continue
+
+        # If res is string → parse to dict
+        if isinstance(res_data, str):
+            try:
+                res_dict = json.loads(res_data)
+            except json.JSONDecodeError:
+                print(f"⚠️ Skipping table {i} — invalid JSON string in res")
+                continue
+        else:
+            res_dict = res_data
+
+        # Now convert to DataFrame
+        if isinstance(res_dict, dict) and res_dict:
+            df = pd.DataFrame.from_dict(res_dict, orient="index")
+
+            stem = os.path.splitext(result.get("file_name", "output"))[0]
+            csv_path = os.path.join(out_dir, f"{stem}_table{i}.csv")
+            df.to_csv(csv_path, index=False)
+            saved["csvs"].append(csv_path)
+
+    return saved
+
+
+# ---------------- Example ----------------
+response = {
+    'code': 0,
+    'result': {
+        'file_name': 'Sample.JPG',
+        'output_image': '/9j/4AAQSkZJRgABAQAAAQABAAD...',
+        'output_result': [
+            {
+                'bbox': [10, 2, 1107, 565],
+                'res': '{"0":{"General Terms":"Party A","Unnamed: 1":":","Unnamed: 2":"Some Value"},'
+                       '"1":{"General Terms":"Party B","Unnamed: 1":":","Unnamed: 2":"Another Value"}}',
+                'type': 'table'
+            }
+        ],
+        'output_type': 'json(orient: index)',
+        'request_id': '1ac9e766-ca33-4ce0-bb06-ad846665edfa'
+    }
+}
+
+paths = process_response(response, out_dir="outputs")
+print(paths)
