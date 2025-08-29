@@ -1,0 +1,75 @@
+from typing import Dict, List, Any
+from dataclasses import dataclass, field
+import spacy
+from spacy.language import Language
+from spacy.pipeline import EntityRuler
+from patterns import ATTRIBUTE_PATTERNS
+
+@dataclass
+class Occurrence:
+    value: str
+    context: str
+    start: int
+    end: int
+    source_idx: int  # which email index
+
+@dataclass
+class ExtractionResult:
+    occurrences: Dict[str, List[Occurrence]] = field(default_factory=dict)
+
+def make_nlp() -> Language:
+    # Use a blank English pipeline with an EntityRuler for deterministic offline behavior.
+    nlp = spacy.blank("en")
+    ruler = nlp.add_pipe("entity_ruler")
+    patterns = []
+    # Add label patterns so attribute keywords are recognized (helps context windows).
+    for label in ["PNL", "P&L", "CVA", "RCVA", "FVA", "VA", "Notional", "NTL", "COB", "Trade", "Date"]:
+        patterns.append({"label": "ATTR_KEY", "pattern": label})
+    ruler.add_patterns(patterns)
+    return nlp
+
+def _slice_context(text: str, start: int, end: int, window: int) -> str:
+    left = max(0, start - window)
+    right = min(len(text), end + window)
+    return text[left:right].replace("\n", " ").strip()
+
+def extract_with_ner_and_regex(
+    texts: List[str],
+    context_window_chars: int = 60
+) -> ExtractionResult:
+    """
+    Extract attributes with regex and capture context windows for each match.
+    texts: list of email bodies (strings)
+    """
+    _ = make_nlp()  # currently we only use ruler to help tokenization scope; doc not needed explicitly here
+    out: Dict[str, List[Occurrence]] = {k: [] for k in ATTRIBUTE_PATTERNS.keys()}
+
+    for i, text in enumerate(texts):
+        for attr, pattern in ATTRIBUTE_PATTERNS.items():
+            for m in pattern.finditer(text):
+                val = m.group(0)
+                # For numeric captures like PnL/CVA etc., prefer the first capturing group if present
+                if m.groups():
+                    grp_vals = [g for g in m.groups() if g]
+                    if grp_vals:
+                        # choose longest group to avoid empty currency codes dominating
+                        val = max(grp_vals, key=len)
+                occ = Occurrence(
+                    value=val,
+                    context=_slice_context(text, m.start(), m.end(), context_window_chars),
+                    start=m.start(),
+                    end=m.end(),
+                    source_idx=i
+                )
+                out[attr].append(occ)
+
+    return ExtractionResult(occurrences=out)
+
+def to_serializable(extr: ExtractionResult) -> Dict[str, Any]:
+    return {
+        attr: [
+            {"value": o.value, "context": o.context, "start": o.start, "end": o.end, "source_idx": o.source_idx}
+            for o in occs
+        ]
+        for attr, occs in extr.occurrences.items()
+    }
